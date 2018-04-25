@@ -1,0 +1,1159 @@
+Description: >
+  Basic ECS cluster with an auto scaling group, internet-facing, and internal
+  application load balancers.
+
+Parameters:
+  InstanceType:
+    Description: The type of instances to use in the ECS cluster. See https://www.ec2instances.info/
+    Type: String
+
+  MinClusterSize:
+    Description: Minimum number of instances in the ECS cluster.
+    Type: Number
+
+  MaxClusterSize:
+    Description: Maximum number of instances in the ECS cluster.
+    Type: Number
+
+  LargestContainerCpuReservation:
+    Description: The CPU reservation for the largest container that will run in the cluster.
+                 LargestContainerCpuReservation and LargestContainerMemoryReservation is used to
+                 publish a custom CloudWatch metric called SchedulableContainers that is used by
+                 instance autoscaling.
+    Type: Number
+    Default: 1024
+
+  LargestContainerMemoryReservation:
+    Description: The memory reservation for the largest container that will run in the cluster.
+                 LargestContainerCpuReservation and LargestContainerMemoryReservation is used to
+                 publish a custom CloudWatch metric called SchedulableContainers that is used by
+                 instance autoscaling.
+    Type: Number
+    Default: 4096
+
+  ClusterScaleUpAdjustment:
+    Description: The scaling adjustment during a scale up event. ClusterScaleUpAdjustmentType
+                 determines the unit.
+    Type: String
+
+  ClusterScaleUpAdjustmentType:
+    Description: The scale up adjustment type.
+    Type: String
+    AllowedValues: [ChangeInCapacity, PercentChangeInCapacity]
+    Default: ChangeInCapacity
+
+  ClusterScaleUpCooldown:
+    Description: The amount of time, in seconds, after a scale up activity completes before any
+                 further trigger-related scaling activities can start.
+    Type: String
+
+  ClusterScaleUpMins:
+    Description: The number of minutes that the SchedulableContainers metric is above
+                 ClusterScaleUpThreshold before scaling up the instances.
+    Type: Number
+
+  ClusterScaleUpThreshold:
+    Description: The number of SchedulableContainers before scaling the cluster up.
+    Type: Number
+
+  ClusterScaleDownAdjustment:
+    Description: The scaling adjustment during a scale down event. ClusterScaleDownAdjustmentType
+                 determines the unit.
+    Type: String
+
+  ClusterScaleDownAdjustmentType:
+    Description: The scale down adjustment type.
+    Type: String
+    AllowedValues: [ChangeInCapacity, PercentChangeInCapacity]
+    Default: ChangeInCapacity
+
+  ClusterScaleDownCooldown:
+    Description: The amount of time, in seconds, after a scale down activity completes before any
+                 further trigger-related scaling activities can start.
+    Type: String
+
+  ClusterScaleDownMins:
+    Description: The number of SchedulableContainers before scaling the cluster down.
+    Type: Number
+
+  ClusterScaleDownThreshold:
+    Description: The number of SchedulableContainers before scaling the cluster down.
+    Type: Number
+
+  VPC:
+    Description: VPC this ECS cluster will be be deployed to.
+    Type: AWS::EC2::VPC::Id
+
+  AmiId:
+    Description: AMI ID for the EC2 instances.
+    Type: String
+
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the ECS instances.
+    Type: AWS::EC2::KeyPair::KeyName
+
+  AdditonalEC2SecurityGroups:
+    Description: Optional comma separated list of additional security groups to add to the EC2
+                 instances.
+    Type: String
+    Default: ""
+
+  EbsVolumeSize:
+    Description: Size of the EBS volumes on each instance.
+    Type: String
+
+  CreateInternetFacingLoadBalancer:
+    Description: Whether or not to create the internal load balancer.
+    Type: String
+    AllowedValues: [true, false]
+    Default: true
+
+  VpcInternetFacingSubnets:
+    Description: Subnets that the internet-facing load balancers will use. This is not used if
+                 the CreateInternetFacingLoadBalancer parameter is false.
+    Type: List<AWS::EC2::Subnet::Id>
+
+  CreateInternalLoadBalancer:
+    Description: Whether or not to create the internet facing load balancer.
+    Type: String
+    AllowedValues: [true, false]
+    Default: true
+
+  VpcInternalSubnets:
+    Description: Subnets that the internal load balancers (if enabled by CreateInternalLoadBalancer)
+                 and EC2 instances will be placed in.
+    Type: List<AWS::EC2::Subnet::Id>
+
+  SslCertificateId:
+    Description: SSL Certificate ID for the HTTPS load balancer(s).
+    Type: String
+
+  OwnerTag:
+    Description: Owner tag for the EC2 instances and EBS volumes.
+    Type: String
+
+  ProductTag:
+    Description: Product tag for the EC2 instances and EBS volumes.
+    Type: String
+
+  ComponentTag:
+    Description: Component tag for the EC2 instances and EBS volumes.
+    Type: String
+
+  EnvironmentTag:
+    Description: Environment tag for the EC2 instances and EBS volumes.
+    Type: String
+    AllowedValues: [dev, qa, prod]
+    ConstraintDescription: Please choose either dev, qa or prod
+
+  SpotEnabled:
+    Description: Set to true if you want to use autospotting to manage spot instances.
+    Type: String
+
+  MinOnDemandPercentage:
+    Description: Minimum percentage of on-demand instances in the cluster. This is only used
+                 if the SpotEnabled parameter is true. This tag is used by autospotting.
+    Type: String
+
+  ChaosMonkey:
+    Description: The value of the chaos_monkey tag for Netflix's Chaos Monkey.
+    Type: String
+    AllowedValues: [true, false]
+    Default: true
+
+  NewRelicLicenseKey:
+    Description: New Relic license key for the infrastructure monitoring.
+    Type: String
+
+  Task1ToStartOnAllInstances:
+    Description: Task definition 1 to start on all EC2 instances
+    Type: String
+    Default: ""
+
+  PurgeS3LogsOnStackDelete:
+    Description: Set this to true if this is a test cluster and you want the logs S3 bucket to be
+                 automatically purged so that the CloudFormation stack delete operation does not
+                 fail.
+    Type: String
+    AllowedValues: [true, false]
+    Default: false
+
+Conditions:
+  HasAdditonalEC2SecurityGroups: !Not [ !Equals [!Ref AdditonalEC2SecurityGroups, '']]
+  HasInternalLoadBalancer: !Equals [!Ref CreateInternalLoadBalancer, true]
+  HasInternetFacingLoadBalancer: !Equals [!Ref CreateInternetFacingLoadBalancer, true]
+  HasLoadBalancerResources: !Or [Condition: HasInternalLoadBalancer,
+                                 Condition: HasInternetFacingLoadBalancer]
+  HasPurgeS3LogsOnStackDelete: !And [!Equals [!Ref PurgeS3LogsOnStackDelete, true],
+                                     Condition: HasLoadBalancerResources]
+
+Resources:
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref AWS::StackName
+
+  ECSAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier: !Ref VpcInternalSubnets
+      LaunchConfigurationName: !Ref ECSLaunchConfiguration
+      MinSize: !Ref MinClusterSize
+      MaxSize: !Ref MaxClusterSize
+      MetricsCollection:
+        - Granularity: 1Minute
+      NotificationConfigurations:
+      - TopicARN: !Ref ASGTerminateSNSTopic
+        NotificationTypes:
+        - autoscaling:EC2_INSTANCE_TERMINATE
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+          PropagateAtLaunch: true
+        - Key: owner
+          Value: !Ref OwnerTag
+          PropagateAtLaunch: true
+        - Key: product
+          Value: !Ref ProductTag
+          PropagateAtLaunch: true
+        - Key: component
+          Value: !Ref ComponentTag
+          PropagateAtLaunch: true
+        - Key: environment
+          Value: !Ref EnvironmentTag
+          PropagateAtLaunch: true
+        - Key: spot-enabled
+          Value: !Ref SpotEnabled
+          PropagateAtLaunch: false
+        - Key: autospotting_min_on_demand_percentage
+          Value: !Ref MinOnDemandPercentage
+          PropagateAtLaunch: false
+        - Key: chaos_monkey
+          Value: !Ref ChaosMonkey
+          PropagateAtLaunch: true
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 1
+        MaxBatchSize: 1
+        PauseTime: PT15M
+        WaitOnResourceSignals: true
+
+  ScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: !Ref ClusterScaleUpAdjustmentType
+      PolicyType: SimpleScaling
+      Cooldown: !Ref ClusterScaleUpCooldown
+      AutoScalingGroupName:
+        Ref: ECSAutoScalingGroup
+      ScalingAdjustment: !Ref ClusterScaleUpAdjustment
+
+  ScaleDownPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: !Ref ClusterScaleDownAdjustmentType
+      PolicyType: SimpleScaling
+      Cooldown: !Ref ClusterScaleDownCooldown
+      AutoScalingGroupName:
+        Ref: ECSAutoScalingGroup
+      ScalingAdjustment: !Ref ClusterScaleDownAdjustment
+
+  SchedulableContainersLow:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      EvaluationPeriods: !Ref ClusterScaleUpMins
+      Statistic: Average
+      Threshold: !Ref ClusterScaleUpThreshold
+      AlarmDescription: Scale up if the SchedulableContainers metric is low
+      Period: '60'
+      AlarmActions:
+      - Ref: ScaleUpPolicy
+      Namespace: AWS/ECS
+      Dimensions:
+      - Name: ClusterName
+        Value:
+          Ref: ECSCluster
+      ComparisonOperator: LessThanThreshold
+      MetricName: SchedulableContainers
+
+  SchedulableContainersHigh:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      EvaluationPeriods: !Ref ClusterScaleDownMins
+      Statistic: Maximum
+      Threshold: !Ref ClusterScaleDownThreshold
+      AlarmDescription: Scale down if the SchedulableContainers metric is high
+      Period: '60'
+      AlarmActions:
+      - Ref: ScaleDownPolicy
+      Namespace: AWS/ECS
+      Dimensions:
+      - Name: ClusterName
+        Value:
+          Ref: ECSCluster
+      ComparisonOperator: GreaterThanThreshold
+      MetricName: SchedulableContainers
+
+  ELBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VPC
+      GroupDescription: Allow access to the EC2 instances from the ELB
+
+  ECSHostSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VPC
+      GroupDescription: Allow access from the ELB and internet network.
+      SecurityGroupIngress:
+        - SourceSecurityGroupId: !Ref ELBSecurityGroup
+          IpProtocol: -1
+        - CidrIp: 10.0.0.0/8
+          IpProtocol: -1
+        - CidrIp: 192.168.0.0/16
+          IpProtocol: -1
+
+  ECSLaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      SecurityGroups:
+        'Fn::If':
+          - HasAdditonalEC2SecurityGroups
+          - !Split [',', !Join [',', [!Ref AdditonalEC2SecurityGroups, !Ref ECSHostSecurityGroup]]]
+          - !Split [',', !Ref ECSHostSecurityGroup]
+      IamInstanceProfile: !Ref ECSInstanceProfile
+      KeyName: !Ref 'KeyName'
+      BlockDeviceMappings:
+        - DeviceName: "/dev/xvda"
+          Ebs:
+            VolumeSize: !Ref EbsVolumeSize
+            VolumeType: gp2
+      UserData:
+        "Fn::Base64": !Sub |
+          #!/bin/bash
+
+          # Increment version number below to force new instances in the cluster.
+          # This is intentionally not a CloudFormation parameter.
+          # Version: 1
+
+          yum install -y python36 python36-pip
+          pip-3.6 install boto3
+
+          /opt/aws/bin/cfn-init -v --region ${AWS::Region} --stack ${AWS::StackName} \
+                        --resource ECSLaunchConfiguration
+          /opt/aws/bin/cfn-signal -e $? --region ${AWS::Region} --stack ${AWS::StackName} \
+                        --resource ECSAutoScalingGroup
+
+          yum update newrelic-infra -y
+          echo "license_key: ${NewRelicLicenseKey}" > /etc/newrelic-infra.yml
+          initctl start newrelic-infra
+
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          commands:
+            01_add_ebs_tags:
+              command: /usr/local/bin/create-ebs-tags.py
+
+          files:
+            "/etc/ecs/ecs.config":
+              mode: "000644"
+              owner: root
+              group: root
+              content: !Sub |
+               ECS_CLUSTER=${ECSCluster}
+               ECS_AVAILABLE_LOGGING_DRIVERS=["splunk","awslogs","json-file"]
+
+            "/etc/init/spot-watcher.conf":
+              mode: "000644"
+              owner: root
+              group: root
+              content: !Sub |
+                description "Set instance to draining when spot instance is about to be terminated."
+                start on stopped rc RUNLEVEL=[345]
+                exec /usr/local/bin/spot-watcher.py
+
+            "/usr/local/bin/spot-watcher.py":
+              mode: "000755"
+              owner: root
+              group: root
+              content: !Sub |
+                #!/usr/bin/env python3
+
+                import json
+                import time
+                import urllib
+                import boto3
+
+                CLUSTER = '${AWS::StackName}'
+                REGION = '${AWS::Region}'
+
+                def spot_watcher():
+                    while not is_scheduled_for_termination():
+                        time.sleep(5)
+
+                    url = 'http://localhost:51678/v1/metadata'
+                    body = urllib.request.urlopen(url).read().decode('UTF-8')
+                    instance_arn = json.loads(body)['ContainerInstanceArn']
+
+                    client = boto3.client('ecs', region_name=REGION)
+                    print('Setting containers on instance %s to draining.' % (instance_arn))
+                    client.update_container_instances_state(cluster=CLUSTER,
+                                                            containerInstances=[instance_arn],
+                                                            status='DRAINING')
+
+                def is_scheduled_for_termination():
+                    url = 'http://169.254.169.254/latest/meta-data/spot/termination-time'
+                    try:
+                        urllib.request.urlopen(url).read()
+                        return True
+                    except Exception:
+                        return False
+
+                if __name__ == '__main__':
+                    spot_watcher()
+
+            "/etc/init/task1.conf":
+              mode: "000644"
+              owner: root
+              group: root
+              content: !Sub |
+                description "Task 1"
+                start on started ecs
+                script
+                  # Wait for ECS agent to start
+                  sleep 5
+                  /usr/local/bin/start-ecs-task.py "${Task1ToStartOnAllInstances}"
+                end script
+                respawn limit 10 10
+
+            "/usr/local/bin/start-ecs-task.py":
+              mode: "000755"
+              owner: root
+              group: root
+              content: !Sub |
+                #!/usr/bin/env python3
+
+                import json
+                import sys
+                import urllib
+                import boto3
+
+                CLUSTER = '${AWS::StackName}'
+                REGION = '${AWS::Region}'
+
+                def start_task(task_arn):
+                    url = 'http://localhost:51678/v1/metadata'
+                    body = urllib.request.urlopen(url).read().decode('UTF-8')
+                    instance_arn = json.loads(body)['ContainerInstanceArn']
+
+                    client = boto3.client('ecs', region_name=REGION)
+                    print('Starting task %s on instance %s.' % (task_arn, instance_arn))
+                    client.start_task(cluster=CLUSTER,
+                                      taskDefinition=task_arn,
+                                      containerInstances=[instance_arn])
+
+                if __name__ == '__main__':
+                    if len(sys.argv) == 1 or sys.argv[1] == '' or sys.argv[1] == '-':
+                        sys.exit(0)
+
+                    start_task(sys.argv[1])
+
+            "/usr/local/bin/create-ebs-tags.py":
+              mode: "000755"
+              owner: root
+              group: root
+              content: !Sub |
+                #!/usr/bin/env python3
+
+                import urllib
+                import boto3
+
+                def tag_ebs_volumes():
+                    client = boto3.client('ec2', region_name='${AWS::Region}')
+                    url = 'http://169.254.169.254/latest/meta-data/instance-id'
+                    instance_id = urllib.request.urlopen(url).read().decode('UTF-8')
+                    response = client.describe_volumes(Filters=[{'Name': 'attachment.instance-id',
+                                                                 'Values': [instance_id]}])
+                    for volume in response['Volumes']:
+                        print('Tagging %s' % (volume['VolumeId']))
+                        client.create_tags(Resources=[volume['VolumeId']],
+                                           Tags=[{'Key': 'Name', 'Value': '${AWS::StackName}'},
+                                                 {'Key': 'product', 'Value': '${ProductTag}'},
+                                                 {'Key': 'component', 'Value': '${ComponentTag}'},
+                                                 {'Key': 'owner', 'Value': '${OwnerTag}'},
+                                                 {'Key': 'environment', 'Value': '${EnvironmentTag}'}])
+
+                if __name__ == '__main__':
+                    tag_ebs_volumes()
+
+            "/etc/cfn/cfn-hup.conf":
+              mode: "000400"
+              owner: root
+              group: root
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+
+            "/etc/cfn/hooks.d/cfn-auto-reloader.conf":
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.ECSLaunchConfiguration.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --region ${AWS::Region} --stack ${AWS::StackName} --resource ECSLaunchConfiguration
+
+          services:
+            sysvinit:
+              cfn-hup:
+                enabled: true
+                ensureRunning: true
+                files:
+                  - /etc/cfn/cfn-hup.conf
+                  - /etc/cfn/hooks.d/cfn-auto-reloader.conf
+
+  ECSRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      RoleName: !Sub ${AWS::StackName}-ECSRole-${AWS::Region}
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+      Policies:
+        - PolicyName: !Sub ecs-service-${AWS::StackName}-logging
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                Resource:
+                  - "*"
+        - PolicyName: !Sub ecs-service-${AWS::StackName}-ebs-tags
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeVolumes
+                  - ec2:CreateTags
+                Resource:
+                  - "*"
+        - PolicyName: !Sub ecs-service-${AWS::StackName}-spot
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:UpdateContainerInstancesState
+                Resource:
+                  - "*"
+        - PolicyName: !Sub ecs-service-${AWS::StackName}-cfn-init
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:DescribeStackResource
+                  - cloudformation:SignalResource
+                Resource:
+                  - "*"
+        - PolicyName: !Sub ecs-service-${AWS::StackName}-start-task
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:StartTask
+                Resource:
+                  - "*"
+
+  ECSInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref ECSRole
+
+  LogsS3Bucket:
+    Type: AWS::S3::Bucket
+    Condition: HasLoadBalancerResources
+    Properties:
+      AccessControl: Private
+      BucketName: !Sub ${AWS::StackName}-${EnvironmentTag}-logs
+      LifecycleConfiguration:
+        Rules:
+          - ExpirationInDays: 365
+            Status: Enabled
+      Tags:
+        - Key: classification
+          Value: internal
+
+  LogsS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Condition: HasLoadBalancerResources
+    Properties:
+      Bucket: !Ref LogsS3Bucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS:
+                - arn:aws:iam::797873946194:root
+            Action:
+              - s3:PutObject
+            Resource: !Sub 'arn:aws:s3:::${LogsS3Bucket}/*'
+
+  PurgeS3BucketOnDeleteFunction:
+    Type: AWS::Lambda::Function
+    Condition: HasPurgeS3LogsOnStackDelete
+    Properties:
+      Description: Purge S3 logs when the CloudFormation stack is deleted.
+      Handler: index.lambda_handler
+      Role: !GetAtt PurgeS3BucketOnDeleteRole.Arn
+      Runtime: python3.6
+      MemorySize: 256
+      Timeout: 300
+      Code:
+        ZipFile: !Sub |
+          import time
+          import boto3
+          import cfnresponse
+
+          BUCKET_NAME = '${LogsS3Bucket}'
+          REGION = '${AWS::Region}'
+
+          def empty_s3_bucket():
+              client = boto3.resource('s3', region_name=REGION)
+              bucket = client.Bucket(BUCKET_NAME)
+              bucket.objects.all().delete()
+
+          def lambda_handler(event, context):
+              if event['RequestType'] == 'Delete':
+                  empty_s3_bucket()
+
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+
+  PurgeS3BucketOnDeleteRole:
+    Type: AWS::IAM::Role
+    Condition: HasPurgeS3LogsOnStackDelete
+    Properties:
+      RoleName: !Sub purge-logs-${AWS::StackName}-role
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub purge-s3-${AWS::StackName}
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              Action:
+                - s3:DeleteObject
+                - s3:ListBucket
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Effect: Allow
+              Resource: "*"
+
+  PurgeS3BucketOnDelete:
+    Type: AWS::CloudFormation::CustomResource
+    Condition: HasPurgeS3LogsOnStackDelete
+    DependsOn:
+      - LogsS3Bucket
+    Properties:
+      ServiceToken: !GetAtt PurgeS3BucketOnDeleteFunction.Arn
+
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: HasLoadBalancerResources
+    Properties:
+      VpcId: !Ref VPC
+      GroupDescription: Access to the load balancer that sits in front of ECS
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: -1
+
+  InternetFacingLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Condition: HasInternetFacingLoadBalancer
+    DependsOn:
+      - LogsS3Bucket
+      - LogsS3BucketPolicy
+    Properties:
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: 60
+        - Key: access_logs.s3.enabled
+          Value: true
+        - Key: access_logs.s3.bucket
+          Value: !Ref LogsS3Bucket
+        - Key: access_logs.s3.prefix
+          Value: internet-facing
+      Subnets: !Ref VpcInternetFacingSubnets
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+        - !Ref ELBSecurityGroup
+
+  InternetFacingLoadBalancerHttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: HasInternetFacingLoadBalancer
+    Properties:
+      LoadBalancerArn: !Ref InternetFacingLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref InternetFacingDefaultTargetGroup
+
+  InternetFacingLoadBalancerHttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: HasInternetFacingLoadBalancer
+    Properties:
+      LoadBalancerArn: !Ref InternetFacingLoadBalancer
+      Certificates:
+        - CertificateArn: !Ref SslCertificateId
+      Port: 443
+      Protocol: HTTPS
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref InternetFacingDefaultTargetGroup
+
+  InternalLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Condition: HasInternalLoadBalancer
+    DependsOn:
+      - LogsS3Bucket
+      - LogsS3BucketPolicy
+    Properties:
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: 60
+        - Key: access_logs.s3.enabled
+          Value: true
+        - Key: access_logs.s3.bucket
+          Value: !Ref LogsS3Bucket
+        - Key: access_logs.s3.prefix
+          Value: internal
+      Subnets: !Ref VpcInternalSubnets
+      Scheme: internal
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+        - !Ref ELBSecurityGroup
+
+  InternalLoadBalancerHttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: HasInternalLoadBalancer
+    Properties:
+      LoadBalancerArn: !Ref InternalLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref InternalDefaultTargetGroup
+
+  InternalLoadBalancerHttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: HasInternalLoadBalancer
+    Properties:
+      LoadBalancerArn: !Ref InternalLoadBalancer
+      Certificates:
+        - CertificateArn: !Ref SslCertificateId
+      Port: 443
+      Protocol: HTTPS
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref InternalDefaultTargetGroup
+
+  # We define a default target group here, as this is a mandatory Parameters
+  # when creating an Application Load Balancer Listener. This is not used, instead
+  # a target group is created per-service in each service template (../services/*)
+  InternetFacingDefaultTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: HasInternetFacingLoadBalancer
+    Properties:
+      Name: !Sub ${AWS::StackName}-ifdef
+      VpcId: !Ref VPC
+      Port: 80
+      Protocol: HTTP
+
+  InternalDefaultTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: HasInternalLoadBalancer
+    Properties:
+      Name: !Sub ${AWS::StackName}-intdef
+      VpcId: !Ref VPC
+      Port: 80
+      Protocol: HTTP
+
+  # Everything between here and ASGTerminateLifecycleHook are for intercepting the autoscaling
+  # termination notifications so that the ECS tasks can be gracefully drained. See
+  # https://aws.amazon.com/blogs/compute/how-to-automate-container-instance-draining-in-amazon-ecs/
+  # The Lambda function included in that ZIP file has several bugs. The code was converted to
+  # Python3, cleaned up, fixed the known bugs, a sleep statement was added so that we don't get
+  # throttled by AWS due to too many API calls, and the code was included inline below. The original
+  # code is hosted at https://github.com/aws-samples/ecs-cid-sample and licensed under the Apache
+  # 2.0 license.
+
+  ASGTerminateLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Gracefully drain ECS tasks from EC2 instances before the instances are
+                   terminated by autoscaling.
+      Handler: index.lambda_handler
+      Role: !GetAtt ASGTerminateExecutionRole.Arn
+      Runtime: python3.6
+      MemorySize: 128
+      Timeout: 60
+      Code:
+        ZipFile: !Sub |
+          import json
+          import time
+          import boto3
+
+          CLUSTER = '${AWS::StackName}'
+          REGION = '${AWS::Region}'
+
+          ECS = boto3.client('ecs', region_name=REGION)
+          ASG = boto3.client('autoscaling', region_name=REGION)
+          SNS = boto3.client('sns', region_name=REGION)
+
+          def find_ecs_instance_info(instance_id):
+              paginator = ECS.get_paginator('list_container_instances')
+              for list_resp in paginator.paginate(cluster=CLUSTER):
+                  arns = list_resp['containerInstanceArns']
+                  desc_resp = ECS.describe_container_instances(cluster=CLUSTER,
+                                                               containerInstances=arns)
+                  for container_instance in desc_resp['containerInstances']:
+                      if container_instance['ec2InstanceId'] != instance_id:
+                          continue
+
+                      print('Found instance: id=%s, arn=%s, status=%s, runningTasksCount=%s' %
+                            (instance_id, container_instance['containerInstanceArn'],
+                             container_instance['status'], container_instance['runningTasksCount']))
+
+                      return (container_instance['containerInstanceArn'],
+                              container_instance['status'], container_instance['runningTasksCount'])
+
+              return None, None, 0
+
+          def instance_has_running_tasks(instance_id):
+              (instance_arn, container_status, running_tasks) = find_ecs_instance_info(instance_id)
+              if instance_arn is None:
+                  print('Could not find instance ID %s. Letting autoscaling kill the instance.' %
+                        (instance_id))
+                  return False
+
+              if container_status != 'DRAINING':
+                  print('Setting container instance %s (%s) to DRAINING' %
+                        (instance_id, instance_arn))
+                  ECS.update_container_instances_state(cluster=CLUSTER,
+                                                       containerInstances=[instance_arn],
+                                                       status='DRAINING')
+
+              return running_tasks > 0
+
+          def lambda_handler(event, context):
+              msg = json.loads(event['Records'][0]['Sns']['Message'])
+
+              if 'LifecycleTransition' not in msg.keys() or \
+                 msg['LifecycleTransition'].find('autoscaling:EC2_INSTANCE_TERMINATING') == -1:
+                  print('Exiting since the lifecycle transition is not EC2_INSTANCE_TERMINATING.')
+                  return
+
+              if instance_has_running_tasks(msg['EC2InstanceId']):
+                  print('Tasks are still running on instance %s; posting msg to SNS topic %s' %
+                        (msg['EC2InstanceId'], event['Records'][0]['Sns']['TopicArn']))
+                  time.sleep(5)
+                  sns_resp = SNS.publish(TopicArn=event['Records'][0]['Sns']['TopicArn'],
+                                         Message=json.dumps(msg),
+                                         Subject='Publishing SNS msg to invoke Lambda again.')
+                  print('Posted msg %s to SNS topic.' % (sns_resp['MessageId']))
+              else:
+                  print('No tasks are running on instance %s; setting lifecycle to complete' %
+                        (msg['EC2InstanceId']))
+
+                  ASG.complete_lifecycle_action(LifecycleHookName=msg['LifecycleHookName'],
+                                                AutoScalingGroupName=msg['AutoScalingGroupName'],
+                                                LifecycleActionResult='CONTINUE',
+                                                InstanceId=msg['EC2InstanceId'])
+
+  ASGTerminateExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Policies:
+        - PolicyName: lambda-inline
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                - autoscaling:CompleteLifecycleAction
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+                - ecs:ListContainerInstances
+                - ecs:DescribeContainerInstances
+                - ecs:UpdateContainerInstancesState
+                - sns:Publish
+                Resource: "*"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AutoScalingNotificationAccessRole
+      Path: "/"
+
+  ASGTerminateSNSLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - autoscaling.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AutoScalingNotificationAccessRole
+      Path: "/"
+
+  ASGTerminateSNSTopic:
+    Type: AWS::SNS::Topic
+    DependsOn: ASGTerminateLambda
+    Properties:
+      Subscription:
+        - Endpoint: !GetAtt ASGTerminateLambda.Arn
+          Protocol: lambda
+
+  ASGTerminateInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+       FunctionName: !Ref ASGTerminateLambda
+       Action: lambda:InvokeFunction
+       Principal: sns.amazonaws.com
+       SourceArn: !Ref ASGTerminateSNSTopic
+
+  ASGTerminateSNSLambdaSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+       Endpoint: !GetAtt ASGTerminateLambda.Arn
+       Protocol: 'lambda'
+       TopicArn: !Ref ASGTerminateSNSTopic
+
+  ASGTerminateLifecycleHook:
+    Type: AWS::AutoScaling::LifecycleHook
+    Properties:
+      AutoScalingGroupName: !Ref ECSAutoScalingGroup
+      DefaultResult: ABANDON
+      HeartbeatTimeout: 900
+      LifecycleTransition: autoscaling:EC2_INSTANCE_TERMINATING
+      NotificationTargetARN: !Ref ASGTerminateSNSTopic
+      RoleARN: !GetAtt ASGTerminateSNSLambdaRole.Arn
+    DependsOn: ASGTerminateSNSTopic
+
+  # The following Python Lambda function is a stripped down version of
+  # http://garbe.io/blog/2017/04/12/a-better-solution-to-ecs-autoscaling/. This is used to
+  # publish a custom CloudWatch metric for instance autoscaling. It is a stripped down version
+  # of the code from Johannes Müller and licensed under the MIT license.
+
+  SchedulableContainersLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Publish a custom metric to CloudWatch with the total number of the largest
+                   container that can be scheduled in the cluster. This metric is used for
+                   instance autoscaling.
+      Handler: index.lambda_handler
+      Role: !GetAtt SchedulableContainersExecutionRole.Arn
+      Runtime: python3.6
+      MemorySize: 128
+      Timeout: 60
+      Code:
+        ZipFile: !Sub |
+          import boto3
+
+          CLUSTER = '${AWS::StackName}'
+          REGION = '${AWS::Region}'
+          MAX_CPU = ${LargestContainerCpuReservation}
+          MAX_MEM = ${LargestContainerMemoryReservation}
+
+          ECS = boto3.client('ecs', region_name=REGION)
+          CLOUDWATCH = boto3.client('cloudwatch', region_name=REGION)
+
+          def lambda_handler(event, context):
+              instances = ECS.list_container_instances(cluster=CLUSTER, status='ACTIVE')
+              args = instances['containerInstanceArns']
+              instances = ECS.describe_container_instances(cluster=CLUSTER,
+                                                           containerInstances=args)
+
+              schedulable_containers = 0
+              for instance in instances['containerInstances']:
+                  remaining_resources = {resource['name']: resource
+                                         for resource in instance['remainingResources']}
+                  containers_by_cpu = int(remaining_resources['CPU']['integerValue'] / MAX_CPU)
+                  containers_by_mem = int(remaining_resources['MEMORY']['integerValue'] / MAX_MEM)
+                  schedulable_containers += min(containers_by_cpu, containers_by_mem)
+
+              print('cluster=%s, max_cpu=%s, max_mem=%s, schedulable containers=%s' %
+                    (CLUSTER, MAX_CPU, MAX_MEM, schedulable_containers))
+
+              CLOUDWATCH.put_metric_data(Namespace='AWS/ECS',
+                                         MetricData=[{
+                                             'MetricName': 'SchedulableContainers',
+                                             'Dimensions': [{
+                                                 'Name': 'ClusterName',
+                                                 'Value': CLUSTER
+                                             }],
+                                             'Value': schedulable_containers
+                                         }])
+
+  SchedulableContainersExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub lambda-${AWS::StackName}-role
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub sc-${AWS::StackName}
+          PolicyDocument:
+           Version: 2012-10-17
+           Statement:
+             Action:
+               - logs:CreateLogGroup
+               - logs:CreateLogStream
+               - logs:PutLogEvents
+               - ecs:DescribeContainerInstances
+               - ecs:ListContainerInstances
+               - cloudwatch:PutMetricData
+             Effect: Allow
+             Resource: "*"
+
+  SchedulableContainersRule:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: "rate(1 minute)"
+      Targets:
+        - Id: !Sub ${AWS::StackName}-scheduler
+          Arn: !GetAtt SchedulableContainersLambda.Arn
+
+  SchedulableContainersInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt SchedulableContainersLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt SchedulableContainersRule.Arn
+
+Outputs:
+  VPC:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub ${AWS::StackName}-VPC
+
+  InternetFacingLoadBalancerUrl:
+    Description: The URL of the ALB
+    Condition: HasInternetFacingLoadBalancer
+    Value: !GetAtt InternetFacingLoadBalancer.DNSName
+    Export:
+      Name: !Sub ${AWS::StackName}-internet-facing-url
+
+  InternetFacingLoadBalancerHostedZoneId:
+    Description: The ID of the Amazon Route 53 hosted zone associated with the internet-facing
+                 load balancer.
+    Condition: HasInternetFacingLoadBalancer
+    Value: !GetAtt InternetFacingLoadBalancer.CanonicalHostedZoneID
+    Export:
+      Name: !Sub ${AWS::StackName}-internet-facing-hosted-zone-id
+
+  InternetFacingHttpListener:
+    Description: A reference to the internet-facing HTTP listener
+    Condition: HasInternetFacingLoadBalancer
+    Value: !Ref InternetFacingLoadBalancerHttpListener
+    Export:
+      Name: !Sub ${AWS::StackName}-internet-facing-http-listener
+
+  InternetFacingHttpsListener:
+    Description: A reference to the internet-facing HTTPS listener
+    Condition: HasInternetFacingLoadBalancer
+    Value: !Ref InternetFacingLoadBalancerHttpsListener
+    Export:
+      Name: !Sub ${AWS::StackName}-internet-facing-https-listener
+
+  InternalLoadBalancerUrl:
+    Description: The URL of the ALB
+    Condition: HasInternalLoadBalancer
+    Value: !GetAtt InternalLoadBalancer.DNSName
+    Export:
+      Name: !Sub ${AWS::StackName}-internal-url
+
+  InternalLoadBalancerHostedZoneId:
+    Description: The ID of the Amazon Route 53 hosted zone associated with the internal load
+                 balancer.
+    Condition: HasInternalLoadBalancer
+    Value: !GetAtt InternalLoadBalancer.CanonicalHostedZoneID
+    Export:
+      Name: !Sub ${AWS::StackName}-internal-hosted-zone-id
+
+  InternalHttpListener:
+    Description: A reference to the internal HTTP listener
+    Condition: HasInternalLoadBalancer
+    Value: !Ref InternalLoadBalancerHttpListener
+    Export:
+      Name: !Sub ${AWS::StackName}-internal-http-listener
+
+  InternalHttpsListener:
+    Description: A reference to the internal HTTPS listener
+    Condition: HasInternalLoadBalancer
+    Value: !Ref InternalLoadBalancerHttpsListener
+    Export:
+      Name: !Sub ${AWS::StackName}-internal-https-listener
+
+  LogsS3Bucket:
+    Description: S3 bucket containing the ALB access logs
+    Condition: HasLoadBalancerResources
+    Value: !Ref LogsS3Bucket
+    Export:
+      Name: !Sub ${AWS::StackName}-logs-s3-bucket
