@@ -585,6 +585,15 @@ Resources:
                   - ecs:StartTask
                 Resource:
                   - "*"
+        - PolicyName: !Sub ecs-service-${AWS::StackName}-mon-put-data
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource:
+                  - "*"
 
   ECSInstanceProfile:
     Type: AWS::IAM::InstanceProfile
