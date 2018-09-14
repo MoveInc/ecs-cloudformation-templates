@@ -1,0 +1,188 @@
+# CloudFormation template for ECS canary deployments. This template creates a new ECS service
+# with a single task for the canary deployment. It then looks up the ECS service that is
+# currently live (via the prevDeployStackName mustache variable), grabs the ALB target group
+# ARN, and wires the new canary task into that target group. CloudFormation doesn't natively
+# support wiring a task into the other target group so the Lambda function
+# TargetGroupRegistrationFunction makes the relevant API calls.
+#
+# This template uses Mustache (or one of its derivities, like Pystache) to inject the following
+# values:
+#
+# - ecsCluster - The name of the ECS cluster to deploy the service into.
+#
+# - envName  - The name of the ECS canary service. This is only used for the CloudFormation
+#              template description.
+#
+# - iamRoleArn - Optional. An existing IAM role ARN that will be used as the ECS task role.
+#                If you specify this, then do not specify iamTaskPolicy.
+#
+# - iamTaskPolicy - Optional. Create a new IAM role for the ECS task role. This is the policy
+#                   document for the AWS::IAM::Role CloudFormation resource.
+#
+# - prevDeployStackName - The CloudFormation stack name for the existing ECS blue / green
+#                         service that the canary will be wired into. This template assumes
+#                         that the CloudFormation stack exports a variable named
+#                         ${STACKNAME}-tg with the ARN of the target group. The provided
+#                         ECS blue/green service template contains the correct export.
+#
+# - taskDefinitionYaml - The AWS::ECS::TaskDefinition CloudFormation configuration. This is
+#                        embedded within Move's projects in the deployment/Dockerrun.aws.yml
+#                        file.
+#                        https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ecs-taskdefinition.html
+
+Description: {{ envName }} canary ECS service.
+
+Resources:
+  Service:
+    Type: AWS::ECS::Service
+    {{#iamTaskPolicy}}
+    DependsOn:
+      - TaskRole
+    {{/iamTaskPolicy}}
+    Properties:
+      ServiceName: !Ref AWS::StackName
+      Cluster: {{ ecsCluster }}
+      DesiredCount: 1
+      TaskDefinition: !Ref TaskDefinition
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      {{#iamRoleArn}}
+      TaskRoleArn: {{ iamRoleArn }}
+      {{/iamRoleArn}}
+      {{#iamTaskPolicy}}
+      TaskRoleArn: !Ref TaskRole
+      {{/iamTaskPolicy}}
+{{{ taskDefinitionYaml }}}
+
+{{#iamTaskPolicy}}
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub svc-${AWS::StackName}-role
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub svc-${AWS::StackName}
+          PolicyDocument:
+{{{ iamTaskPolicy }}}
+{{/iamTaskPolicy}}
+
+  TargetGroupRegistrationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.6
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import time
+          import boto3
+          import cfnresponse
+
+          ECS_BOTO = boto3.client('ecs')
+          ELBV2_BOTO = boto3.client('elbv2')
+
+          def lookup_canary_instance(cluster, canary_svc_arn):
+              resp = ECS_BOTO.list_tasks(cluster=cluster, serviceName=canary_svc_arn)
+              task_arn = resp['taskArns'][0]
+
+              resp = ECS_BOTO.describe_tasks(cluster=cluster, tasks=[task_arn])
+              container_instance_arn = resp['tasks'][0]['containerInstanceArn']
+              host_port = resp['tasks'][0]['containers'][0]['networkBindings'][0]['hostPort']
+
+              resp = ECS_BOTO.describe_container_instances(cluster=cluster,
+                                                           containerInstances=[container_instance_arn])
+              ec2_instance_id = resp['containerInstances'][0]['ec2InstanceId']
+
+              return (ec2_instance_id, host_port)
+
+          def lambda_handler(event, context):
+              (ec2_instance_id, host_port) = \
+                lookup_canary_instance(event['ResourceProperties']['EcsCluster'],
+                                       event['ResourceProperties']['CanaryServiceArn'])
+
+              params = {'TargetGroupArn': event['ResourceProperties']['TargetGroupArn'],
+                        'Targets': [{'Id': ec2_instance_id, 'Port': host_port}]}
+
+              if event['RequestType'] == 'Delete':
+                  print('Deregistering target %s' % (params))
+                  ELBV2_BOTO.deregister_targets(**params)
+                  time.sleep(5) # wait before deleting ECS service
+              elif event['RequestType'] == 'Create':
+                  print('Registering target %s' % (params))
+                  time.sleep(5) # wait for ECS service to come up before registration.
+                  ELBV2_BOTO.register_targets(**params)
+              else:
+                  print('Performing no action for stack update.')
+
+              ret = {}
+              ret['EC2InstanceID'] = ec2_instance_id
+              ret['HostPort'] = host_port
+
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, ret)
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub lambda-${AWS::StackName}-role
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub svc-${AWS::StackName}
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              Action:
+                - ecs:DescribeContainerInstances
+                - ecs:DescribeTasks
+                - ecs:ListTasks
+                - elasticloadbalancing:RegisterTargets
+                - elasticloadbalancing:DeregisterTargets
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Effect: Allow
+              Resource: "*"
+
+  TargetGroupRegistration:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn:
+      - Service
+      - TaskDefinition
+      {{#iamTaskPolicy}}
+      - TaskRole
+      {{/iamTaskPolicy}}
+    Properties:
+      ServiceToken: !GetAtt TargetGroupRegistrationFunction.Arn
+      EcsCluster: "{{ ecsCluster }}"
+      CanaryServiceArn: !Ref Service
+      TargetGroupArn:
+        'Fn::ImportValue': '{{ prevDeployStackName }}-tg'
+
+Outputs:
+  EC2InstanceID:
+    Description: Canary EC2 instance ID
+    Value: !GetAtt TargetGroupRegistration.EC2InstanceID
+
+  HostPort:
+    Description: Canary EC2 host port
+    Value: !GetAtt TargetGroupRegistration.HostPort

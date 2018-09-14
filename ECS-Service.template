@@ -1,0 +1,449 @@
+# CloudFormation template for ECS blue / green deployments. This template uses Mustache (or one of
+# its derivities, like Pystache) to inject the following values:
+#
+# - ecsCluster - The name of the ECS cluster to deploy the service into.
+#
+# - ecsDeployMaxPercent - Optional. The MaximumPercent field.
+#                         https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-ecs-service-deploymentconfiguration.html
+#
+# - ecsDeployMinHealthyPercent - Optional. The MinimumHealthyPercent field.
+#                                https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-ecs-service-deploymentconfiguration.html
+#
+# - ecsDistinctInstancePlacementConstraint - Optional. Whether or not to enable a distinctInstance
+#                                            placement constraint.
+#                                            https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-ecs-service-placementconstraints-placementconstraint.html
+#
+# - ecsSpreadAzPlacementStrategy - Optional. Whether or not to spread containers across AZs
+#                                  as a placement strategy.
+#                                  https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-ecs-service-placementstrategies-placementstrategy.html
+#
+# - ecsSpreadInstanceIdPlacementStrategy - Optional. Whether or not to spread containers across
+#                                          instances as a placement strategy.
+#                                          https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-ecs-service-placementstrategies-placementstrategy.html
+#
+# - ecsServiceScaleDownAdjustment
+# - ecsServiceScaleDownCompOp
+# - ecsServiceScaleDownEvalPeriods
+# - ecsServiceScaleDownMetric
+# - ecsServiceScaleDownNamespace
+# - ecsServiceScaleDownStatistic
+# - ecsServiceScaleDownThreshold
+# - ecsServiceScaleUpAdjustment
+# - ecsServiceScaleUpCompOp
+# - ecsServiceScaleUpEvalPeriods
+# - ecsServiceScaleUpMetric
+# - ecsServiceScaleUpNamespace
+# - ecsServiceScaleUpStatistic
+# - ecsServiceScaleUpThreshold - Optional. Autoscaling properties for the
+#                                AWS::ApplicationAutoScaling::ScalableTarget and
+#                                AWS::ApplicationAutoScaling::ScalingPolicy.
+#
+# - envName  - The name of the ECS canary service. This is only used for the CloudFormation
+#              template description.
+#
+# - healthCheckHttpCode - The expected HTTP status code from the health check endpoint.
+#                         https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-elasticloadbalancingv2-targetgroup.html
+#
+# - healthCheckUrl - The relative path of the health check URL.
+#                         https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-elasticloadbalancingv2-targetgroup.html
+#
+# - httpListenerExport
+# - httpsListenerExport - The ARN of the HTTP/HTTPS listeners on the ALB. This is typically the
+#                         CloudFormation export ${ECS_CLUSTER}-${ALB_SCHEME}-http-listener,
+#                         where ALB_SCHEME is either internal or internet_facing. See the
+#                         ECS Cluster CloudFormation template in this repo for the export.
+#                         https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-elasticloadbalancingv2-listener.html
+#
+# - iamRoleArn - Optional. An existing IAM role ARN that will be used as the ECS task role.
+#                If you specify this, then do not specify iamTaskPolicy.
+#
+# - iamTaskPolicy - Optional. Create a new IAM role for the ECS task role. This is the policy
+#                   document for the AWS::IAM::Role CloudFormation resource.
+#
+# - mainContainerName
+# - mainContainerPort - The container name and container port that will receive traffic from the ALB
+#                       https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-ecs-service-loadbalancers.html
+#
+# - minCapacity
+# - maxCapacity - The min/max capacity for the ECS service application autoscaling group.
+#                 https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-applicationautoscaling-scalabletarget.html
+#
+# - prevDesiredCount - The desired count for the ECS service. Typically, when we do a blue / green
+#                      deployment, the deployment pipeline gets the desired count of
+#
+# - targetGroupDeregistrationDelay - The target group deregistration delay.
+#                                    https://docs.aws.amazon.com/elasticloadbalancing/latest/APIReference/API_TargetGroupAttribute.html
+#
+# - targetGroupLbCookieDurationSecs
+# - targetGroupStickinessEnabled - Whether or not session stickiness is enabled at the ALB and how
+#                                  long the session tokens should live.
+#                                  https://docs.aws.amazon.com/elasticloadbalancing/latest/APIReference/API_TargetGroupAttribute.html
+#
+# - taskDefinitionYaml - The AWS::ECS::TaskDefinition CloudFormation configuration. This is
+#                        embedded within Move's projects in the deployment/Dockerrun.aws.yml
+#                        file.
+#                        https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ecs-taskdefinition.html
+
+
+Description: {{ envName }} ECS service.
+
+Parameters:
+  ServiceName:
+    Type: String
+    Description: ECS service name
+
+  Hostname:
+    Type: String
+    Description: Hostname 1 for the ALB
+
+  Hostname2:
+    Type: String
+    Description: Optional hostname 2 for the ALB.
+    Default: "unused.internal"
+
+  Hostname3:
+    Type: String
+    Description: Optional hostname 3 for the ALB.
+    Default: "unused.internal"
+
+  AlbPriority:
+    Type: Number
+    Description: ALB priority 1
+
+  AlbPriority2:
+    Type: Number
+    Description: Optional ALB priority 2. Requires Hostname2 to not be empty
+    Default: -1
+
+  AlbPriority3:
+    Type: Number
+    Description: Optional ALB priority 3. Requires Hostname3 to not be empty
+    Default: -1
+
+Conditions:
+  HasHostname2:
+    Fn::Not:
+    - !Equals [ "unused.internal", !Ref Hostname2 ]
+  HasHostname3:
+    Fn::Not:
+    - !Equals [ "unused.internal", !Ref Hostname3 ]
+
+Resources:
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - EcsServiceRole
+      - HttpListenerRule
+      - HttpsListenerRule
+      - TargetGroup
+{{#iamTaskPolicy}}
+      - TaskRole
+{{/iamTaskPolicy}}
+    Properties:
+      ServiceName: !Ref ServiceName
+      Cluster: {{ ecsCluster }}
+      Role: !Ref EcsServiceRole
+      DesiredCount: {{ prevDesiredCount }}
+      TaskDefinition: !Ref TaskDefinition
+{{#ecsDeployMinHealthyPercent}}
+      DeploymentConfiguration:
+{{#ecsDeployMaxPercent}}
+        MaximumPercent: {{ ecsDeployMaxPercent }}
+{{/ecsDeployMaxPercent}}
+        MinimumHealthyPercent: {{ecsDeployMinHealthyPercent}}
+{{/ecsDeployMinHealthyPercent}}
+{{#ecsDistinctInstancePlacementConstraint}}
+      PlacementConstraints:
+        - Type: distinctInstance
+{{/ecsDistinctInstancePlacementConstraint}}
+      PlacementStrategies:
+{{#ecsSpreadAzPlacementStrategy}}
+        - Type: spread
+          Field: attribute:ecs.availability-zone
+{{/ecsSpreadAzPlacementStrategy}}
+{{#ecsSpreadInstanceIdPlacementStrategy}}
+        - Type: spread
+          Field: instanceId
+{{/ecsSpreadInstanceIdPlacementStrategy}}
+      LoadBalancers:
+        - ContainerName: {{ mainContainerName }}
+          ContainerPort: {{ mainContainerPort }}
+          TargetGroupArn: !Ref TargetGroup
+
+{{#ecsServiceScaleUpMetric}}
+  ServiceScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    DependsOn: Service
+    Properties:
+      MinCapacity: {{ minCapacity }}
+      MaxCapacity: {{ maxCapacity }}
+      ResourceId: !Join ['', [service/{{ ecsCluster }}, /, !GetAtt [Service, Name]]]
+      RoleARN: !GetAtt [AutoscalingRole, Arn]
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+
+  AutoscalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+              - application-autoscaling.amazonaws.com
+          Action:
+            - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceAutoscaleRole
+      Policies:
+        - PolicyName: service-autoscaling
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - application-autoscaling:*
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:PutMetricAlarm
+                Resource:
+                  - "*"
+
+  ServiceScaleUpPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub ${AWS::StackName}-scale-up-policy
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref 'ServiceScalingTarget'
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ChangeInCapacity
+        Cooldown: 300
+        MetricAggregationType: Maximum
+        StepAdjustments:
+          - MetricIntervalLowerBound: 0
+            ScalingAdjustment: {{ ecsServiceScaleUpAdjustment }}
+
+  ServiceScaleDownPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub ${AWS::StackName}-scale-down-policy
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref 'ServiceScalingTarget'
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ChangeInCapacity
+        Cooldown: 300
+        MetricAggregationType: Maximum
+        StepAdjustments:
+          - MetricIntervalUpperBound: 0
+            ScalingAdjustment: {{ ecsServiceScaleDownAdjustment }}
+
+  ScaleUp:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      EvaluationPeriods: '{{ ecsServiceScaleUpEvalPeriods }}'
+      Statistic: {{ ecsServiceScaleUpStatistic }}
+      AlarmDescription: Alarm if {{ ecsServiceScaleUpMetric }} is too high.
+      Period: '60'
+      AlarmActions: [!Ref 'ServiceScaleUpPolicy']
+      Threshold: '{{ ecsServiceScaleUpThreshold }}'
+      ComparisonOperator: {{ ecsServiceScaleUpCompOp }}
+      Namespace: {{ ecsServiceScaleUpNamespace }}
+      Dimensions:
+        - Name: ClusterName
+          Value: {{ ecsCluster }}
+        - Name: ServiceName
+          Value: !GetAtt [Service, Name]
+      MetricName: {{ ecsServiceScaleUpMetric }}
+
+  ScaleDown:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      EvaluationPeriods: '{{ ecsServiceScaleDownEvalPeriods }}'
+      Statistic: {{ ecsServiceScaleDownStatistic }}
+      AlarmDescription: Alarm if {{ ecsServiceScaleDownMetric }} is too low.
+      Period: '60'
+      AlarmActions: [!Ref 'ServiceScaleDownPolicy']
+      Threshold: '{{ ecsServiceScaleDownThreshold }}'
+      ComparisonOperator: {{ ecsServiceScaleDownCompOp }}
+      Namespace: {{ ecsServiceScaleDownNamespace }}
+      Dimensions:
+        - Name: ClusterName
+          Value: {{ ecsCluster }}
+        - Name: ServiceName
+          Value: !GetAtt [Service, Name]
+      MetricName: {{ ecsServiceScaleDownMetric }}
+{{/ecsServiceScaleUpMetric}}
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      {{#iamRoleArn}}
+      TaskRoleArn: {{ iamRoleArn }}
+      {{/iamRoleArn}}
+      {{#iamTaskPolicy}}
+      TaskRoleArn: !Ref TaskRole
+      {{/iamTaskPolicy}}
+{{{ taskDefinitionYaml }}}
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId:
+        'Fn::ImportValue': "{{ ecsCluster}}-VPC"
+      Port: 80
+      Protocol: HTTP
+      Matcher:
+        HttpCode: {{ healthCheckHttpCode }}
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: {{ healthCheckUrl }}
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 5
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: {{ targetGroupDeregistrationDelay }}
+        - Key: stickiness.enabled
+          Value: {{ targetGroupStickinessEnabled }}
+        - Key: stickiness.lb_cookie.duration_seconds
+          Value: {{ targetGroupLbCookieDurationSecs }}
+
+{{#httpListenerExport}}
+  HttpListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn:
+        'Fn::ImportValue': "{{ httpListenerExport }}"
+      Priority: !Ref AlbPriority
+      Conditions:
+        - Field: host-header
+          Values:
+            - !Ref Hostname
+      Actions:
+        - TargetGroupArn: !Ref TargetGroup
+          Type: forward
+
+  HttpListenerRule2:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Condition: HasHostname2
+    Properties:
+      ListenerArn:
+        'Fn::ImportValue': "{{ httpListenerExport }}"
+      Priority: !Ref AlbPriority2
+      Conditions:
+        - Field: host-header
+          Values:
+            - !Ref Hostname2
+      Actions:
+        - TargetGroupArn: !Ref TargetGroup
+          Type: forward
+
+  HttpListenerRule3:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Condition: HasHostname3
+    Properties:
+      ListenerArn:
+        'Fn::ImportValue': "{{ httpListenerExport }}"
+      Priority: !Ref AlbPriority3
+      Conditions:
+        - Field: host-header
+          Values:
+            - !Ref Hostname3
+      Actions:
+        - TargetGroupArn: !Ref TargetGroup
+          Type: forward
+{{/httpListenerExport}}
+
+{{#httpsListenerExport}}
+  HttpsListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn:
+        'Fn::ImportValue': "{{ httpsListenerExport }}"
+      Priority: !Ref AlbPriority
+      Conditions:
+        - Field: host-header
+          Values:
+            - !Ref Hostname
+      Actions:
+        - TargetGroupArn: !Ref TargetGroup
+          Type: forward
+
+  HttpsListenerRule2:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Condition: HasHostname2
+    Properties:
+      ListenerArn:
+        'Fn::ImportValue': "{{ httpsListenerExport }}"
+      Priority: !Ref AlbPriority2
+      Conditions:
+        - Field: host-header
+          Values:
+            - !Ref Hostname2
+      Actions:
+        - TargetGroupArn: !Ref TargetGroup
+          Type: forward
+
+  HttpsListenerRule3:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Condition: HasHostname3
+    Properties:
+      ListenerArn:
+        'Fn::ImportValue': "{{ httpsListenerExport }}"
+      Priority: !Ref AlbPriority3
+      Conditions:
+        - Field: host-header
+          Values:
+            - !Ref Hostname3
+      Actions:
+        - TargetGroupArn: !Ref TargetGroup
+          Type: forward
+{{/httpsListenerExport}}
+
+  # This IAM Role grants the service access to register/unregister with the
+  # Application Load Balancer (ALB). It is based on the default documented here:
+  # http://docs.aws.amazon.com/AmazonECS/latest/developerguide/service_IAM_role.html
+  EcsServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub svc-${AWS::StackName}
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceRole
+
+{{#iamTaskPolicy}}
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub svc-${AWS::StackName}-role
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub svc-${AWS::StackName}
+          PolicyDocument:
+{{{ iamTaskPolicy }}}
+{{/iamTaskPolicy}}
+
+Outputs:
+  TargetGroupArn:
+    Description: Target Group ARN
+    Value: !Ref TargetGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-tg

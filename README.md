@@ -2,5 +2,6 @@ This repository contains some CloudFormation templates for Amazon's Elastic Cont
 
 - [ECS cluster template](ECS-Cluster.template) and [accompanying article](ECS-Cluster.md) that
   describes the features available in the template.
-- *Coming soon* - an article and CloudFormation templates for performing blue/green deployments
-  with canary containers on ECS.
+- [ECS service template](ECS-Service.template),
+  [ECS service canary template](ECS-Service-Canary.template) and
+  [accompanying article](ECS-Blue-Green.md).
