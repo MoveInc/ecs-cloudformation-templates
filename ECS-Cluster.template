@@ -15,6 +15,11 @@ Parameters:
     Description: Maximum number of instances in the ECS cluster.
     Type: Number
 
+  MaxBatchSize:
+    Description: Maximum number of instances to resize in the ECS cluster.
+    Type: Number
+    Default: 1
+
   LargestContainerCpuReservation:
     Description: The CPU reservation for the largest container that will run in the cluster.
                  LargestContainerCpuReservation and LargestContainerMemoryReservation is used to
@@ -237,7 +242,7 @@ Resources:
     UpdatePolicy:
       AutoScalingRollingUpdate:
         MinInstancesInService: 1
-        MaxBatchSize: 1
+        MaxBatchSize: !Ref MaxBatchSize
         PauseTime: PT15M
         WaitOnResourceSignals: true
 
