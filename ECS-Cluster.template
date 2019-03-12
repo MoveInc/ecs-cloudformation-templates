@@ -741,7 +741,7 @@ Resources:
     Type: AWS::IAM::Role
     Condition: HasPurgeS3LogsOnStackDelete
     Properties:
-      RoleName: !Sub purge-logs-${AWS::StackName}-role
+      RoleName: !Sub purge-${AWS::StackName}-${AWS::Region}
       Path: /
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
@@ -1169,7 +1169,7 @@ Resources:
   SchedulableContainersExecutionRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub lambda-${AWS::StackName}-role
+      RoleName: !Sub sc-${AWS::StackName}-${AWS::Region}
       Path: /
       AssumeRolePolicyDocument:
         Version: 2012-10-17
