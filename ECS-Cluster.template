@@ -203,6 +203,13 @@ Parameters:
     AllowedValues: [true, false]
     Default: false
 
+  ASGTerminateTimeout:
+    Description: The number of seconds to wait for existing ECS tasks to drain before forcefully
+                 terminating the EC2 instance. This occurs when upgrading to a newer version of an
+                 AMI, or when the cluster is scaled down.
+    Type: Number
+    Default: 900
+
 Conditions:
   HasAdditonalEC2SecurityGroups: !Not [ !Equals [!Ref AdditonalEC2SecurityGroups, '']]
   HasInternetFacingELBSecurityGroups: !Not [ !Equals [!Ref InternetFacingELBSecurityGroups, '']]
@@ -935,11 +942,13 @@ Resources:
       Code:
         ZipFile: !Sub |
           import json
+          import datetime
           import time
           import boto3
 
           CLUSTER = '${AWS::StackName}'
           REGION = '${AWS::Region}'
+          TIMEOUT = ${ASGTerminateTimeout}
 
           ECS = boto3.client('ecs', region_name=REGION)
           ASG = boto3.client('autoscaling', region_name=REGION)
@@ -980,8 +989,21 @@ Resources:
 
               return running_tasks > 0
 
+          def send_heartbeat(msg):
+              if msg['abandon_time'] < datetime.datetime.now().timestamp():
+                  print('Instance %s timed out; not sending heartbeat.' % (msg['EC2InstanceId']))
+                  return
+
+              ASG.record_lifecycle_action_heartbeat(LifecycleHookName=msg['LifecycleHookName'],
+                                                    AutoScalingGroupName=msg['AutoScalingGroupName'],
+                                                    LifecycleActionToken=msg['LifecycleActionToken'],
+                                                    InstanceId=msg['EC2InstanceId'])
+
           def lambda_handler(event, context):
               msg = json.loads(event['Records'][0]['Sns']['Message'])
+              if 'abandon_time' not in msg:
+                  msg['abandon_time'] = (datetime.datetime.now() + \
+                                         datetime.timedelta(seconds=TIMEOUT)).timestamp()
 
               if 'LifecycleTransition' not in msg.keys() or \
                  msg['LifecycleTransition'].find('autoscaling:EC2_INSTANCE_TERMINATING') == -1:
@@ -989,13 +1011,14 @@ Resources:
                   return
 
               if instance_has_running_tasks(msg['EC2InstanceId']):
-                  print('Tasks are still running on instance %s; posting msg to SNS topic %s' %
-                        (msg['EC2InstanceId'], event['Records'][0]['Sns']['TopicArn']))
-                  time.sleep(5)
+                  print('Tasks are still running on instance %s; posting to SNS topic %s: %s' %
+                        (msg['EC2InstanceId'], event['Records'][0]['Sns']['TopicArn'], msg))
+                  time.sleep(20)
+                  send_heartbeat(msg)
                   sns_resp = SNS.publish(TopicArn=event['Records'][0]['Sns']['TopicArn'],
                                          Message=json.dumps(msg),
-                                         Subject='Publishing SNS msg to invoke Lambda again.')
-                  print('Posted msg %s to SNS topic.' % (sns_resp['MessageId']))
+                                         Subject='Publishing SNS message to invoke Lambda again.')
+                  print('Posted message %s to SNS topic.' % (sns_resp['MessageId']))
               else:
                   print('No tasks are running on instance %s; setting lifecycle to complete' %
                         (msg['EC2InstanceId']))
@@ -1016,6 +1039,7 @@ Resources:
               - Effect: Allow
                 Action:
                 - autoscaling:CompleteLifecycleAction
+                - autoscaling:RecordLifecycleActionHeartbeat
                 - logs:CreateLogGroup
                 - logs:CreateLogStream
                 - logs:PutLogEvents
@@ -1081,7 +1105,7 @@ Resources:
     Properties:
       AutoScalingGroupName: !Ref ECSAutoScalingGroup
       DefaultResult: ABANDON
-      HeartbeatTimeout: 900
+      HeartbeatTimeout: 120
       LifecycleTransition: autoscaling:EC2_INSTANCE_TERMINATING
       NotificationTargetARN: !Ref ASGTerminateSNSTopic
       RoleARN: !GetAtt ASGTerminateSNSLambdaRole.Arn
