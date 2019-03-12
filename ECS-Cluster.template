@@ -180,6 +180,16 @@ Parameters:
     Type: String
     Default: ""
 
+  LogsS3BucketName:
+    Description: The optional name of the S3 bucket that the ALB access logs will be sent to.
+                 Leave blank if you want CloudFormation to pick a name for you based on the name
+                 of your ECS cluster. You typically want to set this if you are deploying a
+                 cluster to multiple regions with the same name and the default naming scheme
+                 currently doesn't include the region name and S3 bucket names must be globally
+                 unique.
+    Type: String
+    Default: ""
+
   PurgeS3LogsOnStackDelete:
     Description: Set this to true if this is a test cluster and you want the logs S3 bucket to be
                  automatically purged so that the CloudFormation stack delete operation does not
@@ -196,6 +206,7 @@ Conditions:
                                  Condition: HasInternetFacingLoadBalancer]
   HasPurgeS3LogsOnStackDelete: !And [!Equals [!Ref PurgeS3LogsOnStackDelete, true],
                                      Condition: HasLoadBalancerResources]
+  HasLogsS3BucketName: !Not [ !Equals [!Ref LogsS3BucketName, '']]
 
 Resources:
   ECSCluster:
@@ -625,7 +636,11 @@ Resources:
     Condition: HasLoadBalancerResources
     Properties:
       AccessControl: Private
-      BucketName: !Sub ${AWS::StackName}-${EnvironmentTag}-logs
+      BucketName:
+        'Fn::If':
+          - HasLogsS3BucketName
+          - !Ref LogsS3BucketName
+          - !Sub ${AWS::StackName}-${EnvironmentTag}-logs
       LifecycleConfiguration:
         Rules:
           - ExpirationInDays: 365
@@ -652,7 +667,10 @@ Resources:
                 - arn:aws:iam::797873946194:root
             Action:
               - s3:PutObject
-            Resource: !Sub 'arn:aws:s3:::${LogsS3Bucket}/*'
+              - s3:ListBucket
+            Resource:
+              - !Sub arn:aws:s3:::${LogsS3Bucket}
+              - !Sub arn:aws:s3:::${LogsS3Bucket}/*
 
   PurgeS3BucketOnDeleteFunction:
     Type: AWS::Lambda::Function
@@ -707,6 +725,15 @@ Resources:
               Action:
                 - s3:DeleteObject
                 - s3:ListBucket
+              Effect: Allow
+              Resource:
+                - !Sub arn:aws:s3:::${LogsS3Bucket}
+                - !Sub arn:aws:s3:::${LogsS3Bucket}/*
+        - PolicyName: !Sub purge-s3-${AWS::StackName}-logs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              Action:
                 - logs:CreateLogGroup
                 - logs:CreateLogStream
                 - logs:PutLogEvents
