@@ -103,6 +103,11 @@ Parameters:
     Type: String
     Default: ""
 
+  InternetFacingELBSecurityGroups:
+    Description: Optional comma separated list of internet facing security groups to add to the LoadBalancer to make it restricted.
+    Type: String
+    Default: ""
+
   EbsVolumeSize:
     Description: Size of the EBS volumes on each instance.
     Type: String
@@ -200,6 +205,7 @@ Parameters:
 
 Conditions:
   HasAdditonalEC2SecurityGroups: !Not [ !Equals [!Ref AdditonalEC2SecurityGroups, '']]
+  HasInternetFacingELBSecurityGroups: !Not [ !Equals [!Ref InternetFacingELBSecurityGroups, '']]
   HasInternalLoadBalancer: !Equals [!Ref CreateInternalLoadBalancer, true]
   HasInternetFacingLoadBalancer: !Equals [!Ref CreateInternetFacingLoadBalancer, true]
   HasLoadBalancerResources: !Or [Condition: HasInternalLoadBalancer,
@@ -777,8 +783,10 @@ Resources:
       Subnets: !Ref VpcInternetFacingSubnets
       Scheme: internet-facing
       SecurityGroups:
-        - !Ref LoadBalancerSecurityGroup
-        - !Ref ELBSecurityGroup
+        'Fn::If':
+          - HasInternetFacingELBSecurityGroups
+          - !Split [',', !Join [',', [!Ref InternetFacingELBSecurityGroups, !Ref ELBSecurityGroup]]]
+          - !Split [',', !Join [',', [!Ref LoadBalancerSecurityGroup, !Ref ELBSecurityGroup]]]
 
   InternetFacingLoadBalancerHttpListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
