@@ -326,12 +326,31 @@ Resources:
 
   ELBSecurityGroup:
     Type: AWS::EC2::SecurityGroup
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W2
+            reason: "This is a public facing ELB and all traffic should be permitted."
+          - id: W5
+            reason: "This is a public facing ELB and all traffic should be permitted."
+          - id: W9
+            reason: "This is a public facing ELB and all traffic should be permitted."
     Properties:
       VpcId: !Ref VPC
       GroupDescription: Allow access to the EC2 instances from the ELB
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: -1
 
   ECSHostSecurityGroup:
     Type: AWS::EC2::SecurityGroup
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W5
+            reason: "Allow all outbound network traffic."
+          - id: W9
+            reason: "Allow direct access to the ECS services from the internal network."
     Properties:
       VpcId: !Ref VPC
       GroupDescription: Allow access from the ELB and internet network.
@@ -341,6 +360,9 @@ Resources:
         - CidrIp: 10.0.0.0/8
           IpProtocol: -1
         - CidrIp: 192.168.0.0/16
+          IpProtocol: -1
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
           IpProtocol: -1
 
   ECSLaunchConfiguration:
@@ -756,11 +778,23 @@ Resources:
 
   LoadBalancerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W2
+            reason: "This is a public facing ELB and all traffic should be permitted."
+          - id: W5
+            reason: "This is a public facing ELB and all traffic should be permitted."
+          - id: W9
+            reason: "This is a public facing ELB and all traffic should be permitted."
     Condition: HasLoadBalancerResources
     Properties:
       VpcId: !Ref VPC
       GroupDescription: Access to the load balancer that sits in front of ECS
       SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: -1
+      SecurityGroupEgress:
         - CidrIp: 0.0.0.0/0
           IpProtocol: -1
 
