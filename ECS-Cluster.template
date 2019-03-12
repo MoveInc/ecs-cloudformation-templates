@@ -107,6 +107,11 @@ Parameters:
     Description: Size of the EBS volumes on each instance.
     Type: String
 
+  DockerVolumeSize:
+    Description: Size of the Docker volumes on each instance.
+    Type: String
+    Default: 50
+
   CreateInternetFacingLoadBalancer:
     Description: Whether or not to create the internal load balancer.
     Type: String
@@ -338,6 +343,11 @@ Resources:
           Ebs:
             VolumeSize: !Ref EbsVolumeSize
             VolumeType: gp2
+        - DeviceName: "/dev/xvdcz"
+          Ebs:
+            VolumeSize: !Ref DockerVolumeSize
+            VolumeType: gp2
+
       UserData:
         "Fn::Base64": !Sub |
           #!/bin/bash
@@ -357,6 +367,9 @@ Resources:
           yum update newrelic-infra -y
           echo "license_key: ${NewRelicLicenseKey}" > /etc/newrelic-infra.yml
           initctl start newrelic-infra
+
+          vgextend docker /dev/xvdcz
+          lvextend -L+${DockerVolumeSize}G /dev/docker/docker-pool
 
     Metadata:
       AWS::CloudFormation::Init:
