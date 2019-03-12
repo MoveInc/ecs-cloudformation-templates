@@ -1258,3 +1258,9 @@ Outputs:
     Value: !Ref LogsS3Bucket
     Export:
       Name: !Sub ${AWS::StackName}-logs-s3-bucket
+
+  ECSHostSecurityGroup:
+    Description: Allow access from the ELB and internet network.
+    Value: !Ref ECSHostSecurityGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-ecs-host-security-group
