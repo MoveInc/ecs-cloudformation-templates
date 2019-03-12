@@ -644,6 +644,11 @@ Resources:
           - Effect: Allow
             Principal:
               AWS:
+                # Account IDs came can be found at
+                # https://docs.aws.amazon.com/elasticloadbalancing/latest/classic/enable-access-logs.html
+                # Currently configures us-east-1, us-east-2, and us-west-2.
+                - arn:aws:iam::127311923021:root
+                - arn:aws:iam::033677994240:root
                 - arn:aws:iam::797873946194:root
             Action:
               - s3:PutObject
