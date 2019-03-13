@@ -203,6 +203,19 @@ Parameters:
     AllowedValues: [true, false]
     Default: false
 
+  DefaultHttpRedirect:
+    Description: The URL that the user will be redirected to when the requested hostname is not
+                 configured in the ALB. If this property is not specified, then the user will see
+                 a HTTP 503 error. This requires DefaultHttpRedirectImage to be set.
+    Type: String
+    Default: ""
+
+  DefaultHttpRedirectImage:
+    Description: Docker image that provides the HTTP direct service. See nginx-redirect directory
+                 for an example.
+    Type: String
+    Default: ""
+
   ASGTerminateTimeout:
     Description: The number of seconds to wait for existing ECS tasks to drain before forcefully
                  terminating the EC2 instance. This occurs when upgrading to a newer version of an
@@ -220,6 +233,8 @@ Conditions:
   HasPurgeS3LogsOnStackDelete: !And [!Equals [!Ref PurgeS3LogsOnStackDelete, true],
                                      Condition: HasLoadBalancerResources]
   HasLogsS3BucketName: !Not [ !Equals [!Ref LogsS3BucketName, '']]
+  HasDefaultHttpRedirect: !And [!Not [ !Equals [!Ref DefaultHttpRedirect, '']],
+                                Condition: HasLoadBalancerResources]
 
 Resources:
   ECSCluster:
@@ -899,9 +914,7 @@ Resources:
         - Type: forward
           TargetGroupArn: !Ref InternalDefaultTargetGroup
 
-  # We define a default target group here, as this is a mandatory Parameters
-  # when creating an Application Load Balancer Listener. This is not used, instead
-  # a target group is created per-service in each service template (../services/*)
+  # Default target groups
   InternetFacingDefaultTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Condition: HasInternetFacingLoadBalancer
@@ -910,6 +923,14 @@ Resources:
       VpcId: !Ref VPC
       Port: 80
       Protocol: HTTP
+      Matcher:
+        HttpCode: 301
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 5
 
   InternalDefaultTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
@@ -919,6 +940,73 @@ Resources:
       VpcId: !Ref VPC
       Port: 80
       Protocol: HTTP
+      Matcher:
+        HttpCode: 301
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 5
+
+  DefaultRedirectTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Condition: HasDefaultHttpRedirect
+    Properties:
+      ContainerDefinitions:
+        - Name: nginx
+          Image: !Ref DefaultHttpRedirectImage
+          Essential: true
+          Memory: 50
+          Environment:
+            - Name: "REDIRECT_URL"
+              Value: !Ref DefaultHttpRedirect
+          PortMappings:
+            - ContainerPort: 80
+
+  DefaultInternetFacingRedirectService:
+    Type: AWS::ECS::Service
+    Condition: HasDefaultHttpRedirect
+    DependsOn:
+      - InternetFacingLoadBalancer
+      - InternetFacingLoadBalancerHttpListener
+      - InternetFacingLoadBalancerHttpsListener
+    Properties:
+      ServiceName: !Sub ${AWS::StackName}-if-redirect
+      Cluster: !Ref ECSCluster
+      DesiredCount: 2
+      TaskDefinition: !Ref DefaultRedirectTaskDefinition
+      PlacementStrategies:
+        - Type: spread
+          Field: attribute:ecs.availability-zone
+        - Type: spread
+          Field: instanceId
+      LoadBalancers:
+        - ContainerName: nginx
+          ContainerPort: 80
+          TargetGroupArn: !Ref InternetFacingDefaultTargetGroup
+
+  DefaultInternalRedirectService:
+    Type: AWS::ECS::Service
+    Condition: HasDefaultHttpRedirect
+    DependsOn:
+      - InternalLoadBalancer
+      - InternalLoadBalancerHttpListener
+      - InternalLoadBalancerHttpsListener
+    Properties:
+      ServiceName: !Sub ${AWS::StackName}-int-redirect
+      Cluster: !Ref ECSCluster
+      DesiredCount: 2
+      TaskDefinition: !Ref DefaultRedirectTaskDefinition
+      PlacementStrategies:
+        - Type: spread
+          Field: attribute:ecs.availability-zone
+        - Type: spread
+          Field: instanceId
+      LoadBalancers:
+        - ContainerName: nginx
+          ContainerPort: 80
+          TargetGroupArn: !Ref InternalDefaultTargetGroup
 
   # Everything between here and ASGTerminateLifecycleHook are for intercepting the autoscaling
   # termination notifications so that the ECS tasks can be gracefully drained. See
