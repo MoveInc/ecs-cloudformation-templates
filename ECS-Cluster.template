@@ -223,6 +223,12 @@ Parameters:
     Type: Number
     Default: 900
 
+  ContainerDeviceManagerSize:
+    Description: The amount of disk space to allocate in device manager to each running container.
+                 Currently ECS does not allow configuring this on a per-container basis.
+    Type: String
+    Default: "10"
+
 Conditions:
   HasAdditonalEC2SecurityGroups: !Not [ !Equals [!Ref AdditonalEC2SecurityGroups, '']]
   HasInternetFacingELBSecurityGroups: !Not [ !Equals [!Ref InternetFacingELBSecurityGroups, '']]
@@ -438,6 +444,8 @@ Resources:
           commands:
             01_add_ebs_tags:
               command: /usr/local/bin/create-ebs-tags.py
+            02_docker_storage_opt:
+              command: !Sub echo 'OPTIONS="$OPTIONS --storage-opt dm.basesize=${ContainerDeviceManagerSize}G"' >> /etc/sysconfig/docker
 
           files:
             "/etc/ecs/ecs.config":
