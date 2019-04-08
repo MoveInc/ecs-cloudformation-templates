@@ -1019,11 +1019,9 @@ Resources:
   # Everything between here and ASGTerminateLifecycleHook are for intercepting the autoscaling
   # termination notifications so that the ECS tasks can be gracefully drained. See
   # https://aws.amazon.com/blogs/compute/how-to-automate-container-instance-draining-in-amazon-ecs/
-  # The Lambda function included in that ZIP file has several bugs. The code was converted to
-  # Python3, cleaned up, fixed the known bugs, a sleep statement was added so that we don't get
-  # throttled by AWS due to too many API calls, and the code was included inline below. The original
-  # code is hosted at https://github.com/aws-samples/ecs-cid-sample and licensed under the Apache
-  # 2.0 license.
+  # and https://github.com/aws-samples/ecs-cid-sample for the original code licensed under the
+  # Apache 2.0 license. The code has been significantly refactored and the core fixes have been
+  # pushed upstream back to AWS.
 
   ASGTerminateLambda:
     Type: AWS::Lambda::Function
@@ -1037,92 +1035,90 @@ Resources:
       Timeout: 60
       Code:
         ZipFile: !Sub |
-          import json
           import datetime
+          import json
           import time
           import boto3
 
           CLUSTER = '${AWS::StackName}'
-          REGION = '${AWS::Region}'
           TIMEOUT = ${ASGTerminateTimeout}
 
-          ECS = boto3.client('ecs', region_name=REGION)
-          ASG = boto3.client('autoscaling', region_name=REGION)
-          SNS = boto3.client('sns', region_name=REGION)
+          def aws(svc):
+              return boto3.client(svc, region_name='${AWS::Region}')
 
-          def find_ecs_instance_info(instance_id):
-              paginator = ECS.get_paginator('list_container_instances')
-              for list_resp in paginator.paginate(cluster=CLUSTER):
-                  arns = list_resp['containerInstanceArns']
-                  desc_resp = ECS.describe_container_instances(cluster=CLUSTER,
-                                                               containerInstances=arns)
-                  for container_instance in desc_resp['containerInstances']:
-                      if container_instance['ec2InstanceId'] != instance_id:
-                          continue
+          ASG = aws('autoscaling')
+          EC2 = aws('ec2')
+          ECS = aws('ecs')
+          SNS = aws('sns')
 
-                      print('Found instance: id=%s, arn=%s, status=%s, runningTasksCount=%s' %
-                            (instance_id, container_instance['containerInstanceArn'],
-                             container_instance['status'], container_instance['runningTasksCount']))
+          def lookup_instance(msg):
+              res = ECS.list_container_instances(cluster=CLUSTER,
+                                                 filter='ec2InstanceId == %s' % (msg['EC2InstanceId']))
+              if not res['containerInstanceArns']:
+                  return None, None, 0
 
-                      return (container_instance['containerInstanceArn'],
-                              container_instance['status'], container_instance['runningTasksCount'])
+              res = ECS.describe_container_instances(cluster=CLUSTER,
+                                                     containerInstances=res['containerInstanceArns'])
+              ret = (res['containerInstances'][0]['containerInstanceArn'],
+                     res['containerInstances'][0]['status'],
+                     res['containerInstances'][0]['runningTasksCount'])
+              print('Found: %s %s' % (str(ret), msg))
+              return ret
 
-              return None, None, 0
+          def can_terminate(msg):
+              (arn, status, count) = lookup_instance(msg)
+              if arn is None:
+                  print('Cannot lookup: %s' % (msg))
+                  return True
 
-          def instance_has_running_tasks(instance_id):
-              (instance_arn, container_status, running_tasks) = find_ecs_instance_info(instance_id)
-              if instance_arn is None:
-                  print('Could not find instance ID %s. Letting autoscaling kill the instance.' %
-                        (instance_id))
-                  return False
-
-              if container_status != 'DRAINING':
-                  print('Setting container instance %s (%s) to DRAINING' %
-                        (instance_id, instance_arn))
+              if status != 'DRAINING':
+                  print('Draining: %s' % (msg))
                   ECS.update_container_instances_state(cluster=CLUSTER,
-                                                       containerInstances=[instance_arn],
+                                                       containerInstances=[arn],
                                                        status='DRAINING')
+                  (arn, status, count) = lookup_instance(msg)
 
-              return running_tasks > 0
+              if count == 0:
+                  print('Finished draining: %s' % (msg))
+                  return True
 
-          def send_heartbeat(msg):
-              if msg['abandon_time'] < datetime.datetime.now().timestamp():
-                  print('Instance %s timed out; not sending heartbeat.' % (msg['EC2InstanceId']))
+              now = datetime.datetime.now().timestamp()
+              if msg['instance_timeout'] < now:
+                  print('Timed out: %s' % (msg))
+                  return True
+
+              return False
+
+          def lambda_handler(event, context):
+              msg = json.loads(event['Records'][0]['Sns']['Message'])
+              if 'instance_timeout' not in msg:
+                  msg['instance_timeout'] = (datetime.datetime.now() + \
+                                         datetime.timedelta(seconds=TIMEOUT)).timestamp()
+
+              if 'LifecycleTransition' not in msg.keys() or \
+                 msg['LifecycleTransition'].find('autoscaling:EC2_INSTANCE_TERMINATING') == -1:
+                  print('Unknown transition: %s' % (msg))
                   return
+
+              if can_terminate(msg):
+                  print('ASG complete: %s' % (msg))
+                  ASG.complete_lifecycle_action(LifecycleHookName=msg['LifecycleHookName'],
+                                                AutoScalingGroupName=msg['AutoScalingGroupName'],
+                                                LifecycleActionResult='CONTINUE',
+                                                InstanceId=msg['EC2InstanceId'])
+                  return
+
+              print('Tasks are still running: %s' % (msg))
+
+              time.sleep(20)
 
               ASG.record_lifecycle_action_heartbeat(LifecycleHookName=msg['LifecycleHookName'],
                                                     AutoScalingGroupName=msg['AutoScalingGroupName'],
                                                     LifecycleActionToken=msg['LifecycleActionToken'],
                                                     InstanceId=msg['EC2InstanceId'])
-
-          def lambda_handler(event, context):
-              msg = json.loads(event['Records'][0]['Sns']['Message'])
-              if 'abandon_time' not in msg:
-                  msg['abandon_time'] = (datetime.datetime.now() + \
-                                         datetime.timedelta(seconds=TIMEOUT)).timestamp()
-
-              if 'LifecycleTransition' not in msg.keys() or \
-                 msg['LifecycleTransition'].find('autoscaling:EC2_INSTANCE_TERMINATING') == -1:
-                  print('Exiting since the lifecycle transition is not EC2_INSTANCE_TERMINATING.')
-                  return
-
-              if instance_has_running_tasks(msg['EC2InstanceId']):
-                  print('Tasks are still running on instance %s; posting to SNS topic %s: %s' %
-                        (msg['EC2InstanceId'], event['Records'][0]['Sns']['TopicArn'], msg))
-                  time.sleep(20)
-                  send_heartbeat(msg)
-                  sns_resp = SNS.publish(TopicArn=event['Records'][0]['Sns']['TopicArn'],
-                                         Message=json.dumps(msg),
-                                         Subject='Publishing SNS message to invoke Lambda again.')
-                  print('Posted message %s to SNS topic.' % (sns_resp['MessageId']))
-              else:
-                  print('No tasks are running on instance %s; setting lifecycle to complete' %
-                        (msg['EC2InstanceId']))
-
-                  ASG.complete_lifecycle_action(LifecycleHookName=msg['LifecycleHookName'],
-                                                AutoScalingGroupName=msg['AutoScalingGroupName'],
-                                                LifecycleActionResult='CONTINUE',
-                                                InstanceId=msg['EC2InstanceId'])
+              SNS.publish(TopicArn=event['Records'][0]['Sns']['TopicArn'],
+                          Message=json.dumps(msg),
+                          Subject='Retry')
 
   ASGTerminateExecutionRole:
     Type: AWS::IAM::Role
