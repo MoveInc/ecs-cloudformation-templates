@@ -1076,7 +1076,7 @@ Resources:
                   ECS.update_container_instances_state(cluster=CLUSTER,
                                                        containerInstances=[arn],
                                                        status='DRAINING')
-                  (arn, status, count) = lookup_instance(msg)
+                  return False
 
               if count == 0:
                   print('Finished draining: %s' % (msg))
