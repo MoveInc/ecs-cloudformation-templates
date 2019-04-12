@@ -1,0 +1,74 @@
+# This sets up one or more CloudWatch event rules that sends a message to a SQS queue with
+# an ECS task to start. This will only work with ECS clusters that are deployed using the
+# template ECS-Batch-Cluster.template. See the top of that template for a description that
+# describes the overall architecture.
+
+Description: {{ envName }} ECS scheduled tasks.
+
+Resources:
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      TaskRoleArn: !Ref TaskRole
+{{{ taskDefinitionYaml }}}
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ecs-${AWS::StackName}-task-role
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceEventsRole
+      Policies:
+        - PolicyName: !Sub ecs-service-${AWS::StackName}
+          PolicyDocument:
+{{{ iamTaskPolicy }}}
+
+{{#scheduledTaskRules}}
+  ScheduledTask{{name}}:
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: "{{^description}}ecs scheduled task{{/description}}{{#description}}{{.}}{{/description}}"
+      Name: !Sub {{^name}}${AWS::StackName}-{{ random_hex }}{{/name }}{{#name}}{{.}}{{/name}}-rule
+      State: {{^state}}ENABLED{{/state}}{{#state}}{{.}}{{/state}}
+      ScheduleExpression: {{ scheduleExpression }}
+      Targets:
+        - Id: !Sub ${AWS::StackName}-target
+          Arn:
+            'Fn::ImportValue': "{{ ecsCluster }}-start-tasks-queue-arn"
+          Input: !Sub |
+            {
+              {{#containerOverrides}}"containerOverrides": {{#to_json}}{{{containerOverrides}}}{{/to_json}},{{/containerOverrides}}
+              "taskDefinition": "${TaskDefinition}",
+              "jobName": "{{name}}"
+            }
+
+{{/scheduledTaskRules}}
+
+Outputs:
+  TaskDefinition:
+    Description: ECS task definition ARN
+    Value: !Ref TaskDefinition
+
+  ECSCluster:
+    Description: The name of the ECS cluster that the jobs run in.
+    Value: "{{ ecsCluster }}"
+
+  StartTasksQueueArn:
+    Description: SQS queue ARN for submitting jobs to start.
+    Value:
+      'Fn::ImportValue': "{{ ecsCluster }}-start-tasks-queue-arn"
+
+  StartTasksQueueUrl:
+    Description: SQS queue URL for submitting jobs to start.
+    Value:
+      'Fn::ImportValue': "{{ ecsCluster }}-start-tasks-queue-url"

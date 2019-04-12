@@ -1,0 +1,808 @@
+# CloudFormation template for an ECS cluster that runs scheduled batch jobs.
+#
+# ECS currently does not have good integration with EC2 to properly scale up a cluster when
+# there is not enough capacity. When this occurs, the ECS run-task API call will fail with no
+# metrics posted to CloudWatch and the ECS event stream about this issue and there is no good
+# public-facing API available from AWS to detect this situation. For the web-based ECS clusters,
+# we've been running the clusters with enough room to start at least one copy of the largest
+# container that will run. We've periodically encountered issues when running large numbers of
+# batch jobs that some will periodically fail to start due to insufficient capacity in the cluster
+# when several jobs are started within a short period of time.
+#
+# For the long-running jobs, we initially tried to use the autodraining Lambda in
+# ECS-Web-Cluster.template to allow them to complete, however several problems were encountered.
+# The autodraining Lambda would prevent premature instance termination for hours if needed, however
+# that would block all other EC2 autoscaling actions. There may be instances that go idle in that
+# time period, or new jobs may want to start and won't be able to due to insufficient capacity in
+# the cluster.
+#
+# This template takes a different approach to scaling the cluster since we have full control over
+# how the ECS tasks are started in the cluster, and it is acceptable for batch jobs to wait a few
+# minutes to provision additional EC2 instances, An EC2 autoscaling group is created, however no
+# alarms, or scale up/down policies are created for that group. Two Lambda functions are included
+# in this template that are used to scale the cluster up and down as needed.
+#
+# CloudWatch event rules are used for starting the scheduled tasks via the CloudFormation template
+# ECS-Batch-Jobs.template. The CloudWatch event rules have the ability to directly start an ECS
+# task, however these API calls will fail if the cluster does not have sufficient capacity to
+# start those tasks, and no retries are attempted. To work around this limitation, the CloudWatch
+# event rules are configured to post to a SQS queue and the StartTasksFunction Lambda function
+# below is subscribed to that queue. The Lambda function attempts to start the task, and if it
+# fails due to insufficient capacity in the cluster, then the desired number in the autoscaling
+# group is incremented by one, and the Lambda function returns an error so that the message will
+# be redelivered every minute for up to a default of 20 minutes to retry the operation. Any
+# failures beyond that will be delivered to a dead-letter queue.
+#
+# When containers are started, they are placed using the binpack placement strategy so that
+# instances will be packed as tight as possible and to encourage idle instances in the cluster to
+# simplify the scale down operation. The TerminateInstancesFunction Lambda function below is
+# executed every three minutes to scale down the cluster, and it checks for the following
+# conditions:
+#
+#  - If an ECS instance is already set to DRAINING, and there are no running tasks on the instance,
+#    then terminate the underlying EC2 instance.
+#  - Set any instances that have an old launch configuration to DRAINING. This situation typically
+#    occurs when the AMI is updated, instance type is changed, new SSH keypair, etc.
+#  - Any ECS instances that currently have no tasks running and have not had any tasks finish for
+#    the last TerminateInstancesAfterIdleSecs seconds will be set to DRAINING.
+#
+# Be aware that the ECS API is eventually consistent, so terminating instances is done in a
+# two pass manner to eliminate the race condition of the possibility shutting down an instance that
+# is currently running a task. The first call of the terminate lambda will set the instance to
+# DRAINING, and the second call will terminate the instance.
+#
+# It should be noted that this cluster template has the ability to scale down to zero instances on
+# its own when no tasks are running.
+#
+#
+# Scheduled tasks tab in the ECS console
+# --------------------------------------
+#
+# Since the CloudWatch event rules are configured to deliver a message to SQS, instead of directly
+# starting an ECS task, be aware that the 'Scheduled Tasks' tab on the ECS cluster will not
+# show any scheduled tasks. You can view the scheduled tasks in the Event Rules page in CloudWatch.
+#
+#
+# SQS message format
+# ------------------
+#
+# To have a process start a task in the ECS cluster outside of the CloudWatch event rules, add a
+# message to the StartTasksQueue with the following format:
+#
+#     {
+#       "jobName": "COSMETIC_JOB_NAME_SHOWN_IN_STARTED_BY_FIELD",
+#       "taskDefinition": "TASK_DEFINITION_ARN",
+#       "containerOverrides": {
+#         "name": "CONTAINER_NAME_IN_DOCKERRUN_AWS_YML",
+#         "command": [ "command", "arg1", "arg2", "arg3" ],
+#         "environment": [
+#           {
+#             "name": "SOME_ENV_VAR",
+#             "value": "SOME_VALUE"
+#           }
+#         ],
+#         "memory": 750
+#       }
+#     }
+#
+# The 'jobName' / 'taskDefinition' parameters are required and 'containerOverrides' is optional.
+#
+# The SQS queue information is available as a CloudFormation export in this template and in the
+# template ecs-batch-jobs-v1.template so that your application can easily look up this information
+# via the CloudFormation API.
+#
+#
+# Troubleshooting job launch errors
+# ---------------------------------
+#
+# Go to the Lambda console, pull up the StartTasksFunction for your ECS cluster, click on the
+# Monitoring tab, then the View logs in CloudWatch button, and finally click on the Log Streams
+# for the time period of interest to see the following sequence appear in the logs for tasks that
+# need to scale up the cluster:
+#
+#     Failed to start JOB_JSON
+#     Set desired count of AUTOSCALING_GROUP to XX: JOB_JSON
+#     ... (~1 minute later)
+#     Failed to start JOB_JSON
+#     Instances are starting: asg=XX, ecs=XX-1: JOB_JSON
+#     ...
+#     Started JOB_JSON
+#
+# The Lambda function will retry up to the number of times specified by the
+# StartTasksQueueMaxReceiveCount parameter below and then the message is dropped into a dead-letter
+# queue.
+
+Description: ECS batch job cluster for running scheduled tasks.
+
+Parameters:
+  InstanceType:
+    Description: The type of instances to use in the ECS cluster. See https://www.ec2instances.info/
+    Type: String
+
+  MaxClusterSize:
+    Description: Maximum number of instances in the ECS cluster.
+    Type: Number
+
+  VPC:
+    Description: VPC this ECS cluster will be be deployed to.
+    Type: AWS::EC2::VPC::Id
+
+  AmiId:
+    Description: AMI ID for the EC2 instances.
+    Type: String
+
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the ECS instances.
+    Type: AWS::EC2::KeyPair::KeyName
+
+  AdditonalEC2SecurityGroups:
+    Description: Optional comma separated list of additional security groups to add to the EC2
+                 instances.
+    Type: String
+    Default: ""
+
+  EbsVolumeSize:
+    Description: Size of the EBS volumes on each instance.
+    Type: String
+
+  DockerVolumeSize:
+    Description: Size of the Docker volumes on each instance.
+    Type: String
+    Default: 50
+
+  ContainerDeviceManagerSize:
+    Description: The amount of disk space to allocate in device manager to each running container.
+                 Currently ECS does not allow configuring this on a per-container basis.
+    Type: String
+    Default: "10"
+
+  VpcInternalSubnets:
+    Description: Subnets that the EC2 instances will be placed in.
+    Type: List<AWS::EC2::Subnet::Id>
+
+  OwnerTag:
+    Description: Owner tag for the EC2 instances and EBS volumes.
+    Type: String
+
+  ProductTag:
+    Description: Product tag for the EC2 instances and EBS volumes.
+    Type: String
+
+  ComponentTag:
+    Description: Component tag for the EC2 instances and EBS volumes.
+    Type: String
+
+  EnvironmentTag:
+    Description: Environment tag for the EC2 instances and EBS volumes.
+    Type: String
+    AllowedValues: [dev, qa, prod]
+    ConstraintDescription: Please choose either dev, qa or prod
+
+  ChaosMonkey:
+    Description: The value of the chaos_monkey tag for Netflix's Chaos Monkey.
+    Type: String
+    AllowedValues: [true, false]
+    Default: true
+
+  NewRelicLicenseKey:
+    Description: New Relic license key for the infrastructure monitoring. Leave the value blank
+                 to disable New Relic Infrastructure monitoring.
+    Type: String
+    Default: ""
+
+  TerminateInstancesScheduleExpression:
+    Description: The schedule expression for when to run that Lambda that terminates idle EC2
+                 instances.
+    Type: String
+    Default: "rate(3 minutes)"
+
+  TerminateInstancesAfterIdleSecs:
+    Description: The number of seconds that an instance is idle before it is drained from ECS
+                 and eventually terminated.
+    Type: Number
+    Default: 600
+
+  StartTasksQueueMaxReceiveCount:
+    Description: The maximum number of times that jobs that fail to launch will be retried. Retries
+                 typically occur every minute.
+    Type: Number
+    Default: 20
+
+Conditions:
+  HasAdditonalEC2SecurityGroups: !Not [ !Equals [!Ref AdditonalEC2SecurityGroups, '']]
+
+Resources:
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref AWS::StackName
+
+  ECSAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier: !Ref VpcInternalSubnets
+      LaunchConfigurationName: !Ref ECSLaunchConfiguration
+      MinSize: 0
+      MaxSize: !Ref MaxClusterSize
+      MetricsCollection:
+        - Granularity: 1Minute
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+          PropagateAtLaunch: true
+        - Key: owner
+          Value: !Ref OwnerTag
+          PropagateAtLaunch: true
+        - Key: product
+          Value: !Ref ProductTag
+          PropagateAtLaunch: true
+        - Key: component
+          Value: !Ref ComponentTag
+          PropagateAtLaunch: true
+        - Key: environment
+          Value: !Ref EnvironmentTag
+          PropagateAtLaunch: true
+        - Key: chaos_monkey
+          Value: !Ref ChaosMonkey
+          PropagateAtLaunch: true
+
+  ECSHostSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W5
+            reason: "Allow all outbound network traffic."
+          - id: W9
+            reason: "Allow direct access to the ECS services from the internal network."
+    Properties:
+      VpcId: !Ref VPC
+      GroupDescription: Allow access from the internal network.
+      SecurityGroupIngress:
+        - CidrIp: 10.0.0.0/8
+          IpProtocol: -1
+        - CidrIp: 192.168.0.0/16
+          IpProtocol: -1
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: -1
+
+  ECSLaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      SecurityGroups:
+        'Fn::If':
+          - HasAdditonalEC2SecurityGroups
+          - !Split [',', !Join [',', [!Ref AdditonalEC2SecurityGroups, !Ref ECSHostSecurityGroup]]]
+          - !Split [',', !Ref ECSHostSecurityGroup]
+      IamInstanceProfile: !Ref ECSInstanceProfile
+      KeyName: !Ref 'KeyName'
+      BlockDeviceMappings:
+        - DeviceName: "/dev/xvda"
+          Ebs:
+            VolumeSize: !Ref EbsVolumeSize
+            VolumeType: gp2
+        - DeviceName: "/dev/xvdcz"
+          Ebs:
+            VolumeSize: !Ref DockerVolumeSize
+            VolumeType: gp2
+
+      UserData:
+        "Fn::Base64": !Sub |
+          #!/bin/bash
+
+          # Increment version number below to force new instances in the cluster.
+          # This is intentionally not a CloudFormation parameter.
+          # Version: 1
+
+          /opt/aws/bin/cfn-init -v --region ${AWS::Region} --stack ${AWS::StackName} \
+                        --resource ECSLaunchConfiguration
+          /opt/aws/bin/cfn-signal -e $? --region ${AWS::Region} --stack ${AWS::StackName} \
+                        --resource ECSAutoScalingGroup
+
+          if [ "${NewRelicLicenseKey}" != "" ] ; then
+              echo "license_key: ${NewRelicLicenseKey}" > /etc/newrelic-infra.yml
+              initctl start newrelic-infra
+          fi
+
+          vgextend docker /dev/xvdcz
+          lvextend -L+${DockerVolumeSize}G /dev/docker/docker-pool
+
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          commands:
+            01_add_ebs_tags:
+              command: /usr/local/bin/create-ebs-tags.py
+            02_docker_storage_opt:
+              command: !Sub echo 'OPTIONS="$OPTIONS --storage-opt dm.basesize=${ContainerDeviceManagerSize}G"' >> /etc/sysconfig/docker
+
+          files:
+            "/etc/ecs/ecs.config":
+              mode: "000644"
+              owner: root
+              group: root
+              content: !Sub |
+               ECS_CLUSTER=${ECSCluster}
+               ECS_AVAILABLE_LOGGING_DRIVERS=["splunk","awslogs","json-file"]
+
+            "/usr/local/bin/create-ebs-tags.py":
+              mode: "000755"
+              owner: root
+              group: root
+              content: !Sub |
+                #!/usr/bin/env python3
+
+                import urllib
+                import boto3
+
+                def tag_ebs_volumes():
+                    client = boto3.client('ec2', region_name='${AWS::Region}')
+                    url = 'http://169.254.169.254/latest/meta-data/instance-id'
+                    instance_id = urllib.request.urlopen(url).read().decode('UTF-8')
+                    response = client.describe_volumes(Filters=[{'Name': 'attachment.instance-id',
+                                                                 'Values': [instance_id]}])
+                    for volume in response['Volumes']:
+                        print('Tagging %s' % (volume['VolumeId']))
+                        client.create_tags(Resources=[volume['VolumeId']],
+                                           Tags=[{'Key': 'Name', 'Value': '${AWS::StackName}'},
+                                                 {'Key': 'product', 'Value': '${ProductTag}'},
+                                                 {'Key': 'component', 'Value': '${ComponentTag}'},
+                                                 {'Key': 'owner', 'Value': '${OwnerTag}'},
+                                                 {'Key': 'environment', 'Value': '${EnvironmentTag}'}])
+
+                if __name__ == '__main__':
+                    tag_ebs_volumes()
+
+            "/etc/cfn/cfn-hup.conf":
+              mode: "000400"
+              owner: root
+              group: root
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+
+            "/etc/cfn/hooks.d/cfn-auto-reloader.conf":
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.ECSLaunchConfiguration.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --region ${AWS::Region} --stack ${AWS::StackName} --resource ECSLaunchConfiguration
+
+          services:
+            sysvinit:
+              cfn-hup:
+                enabled: true
+                ensureRunning: true
+                files:
+                  - /etc/cfn/cfn-hup.conf
+                  - /etc/cfn/hooks.d/cfn-auto-reloader.conf
+
+  ECSRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      RoleName: !Sub ${AWS::StackName}-ECSRole-${AWS::Region}
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+      Policies:
+        - PolicyName: !Sub ecs-service-${AWS::StackName}-cfn-init
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:DescribeStackResource
+                  - cloudformation:SignalResource
+                Resource: "*"
+        - PolicyName: !Sub ecs-service-${AWS::StackName}-ebs-tags
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeVolumes
+                  - ec2:CreateTags
+                Resource: "*"
+        - PolicyName: !Sub ecs-service-${AWS::StackName}-logging
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                Resource: "*"
+        - PolicyName: !Sub ecs-service-${AWS::StackName}-mon-put-data
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+
+  ECSInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref ECSRole
+
+  StartTasksFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Start ECS tasks and scale out the number of EC2 instances if necessary.
+      Handler: index.lambda_handler
+      Role: !GetAtt StartTasksLambdaRole.Arn
+      Runtime: python3.6
+      MemorySize: 128
+      Timeout: 60
+      Code:
+        ZipFile: !Sub |
+          import json
+          import boto3
+          import botocore.exceptions
+
+          QUEUE = '${StartTasksQueue}'
+          CLUSTER = '${ECSCluster}'
+          ASG_NAME = '${ECSAutoScalingGroup}'
+
+          AS = boto3.client('autoscaling', region_name='${AWS::Region}')
+          ECS = boto3.client('ecs', region_name='${AWS::Region}')
+
+          def scale_cluster(task):
+              res = ECS.describe_clusters(clusters=[CLUSTER])
+              ecs_instances = res['clusters'][0]['registeredContainerInstancesCount']
+
+              res = AS.describe_auto_scaling_groups(AutoScalingGroupNames=[ASG_NAME])
+              desired = res['AutoScalingGroups'][0]['DesiredCapacity']
+              if desired > ecs_instances:
+                  raise Exception('Instance is starting (asg=%d, ecs=%d) for %s' % \
+                                  (desired, ecs_instances, task))
+
+              desired += 1
+              AS.set_desired_capacity(AutoScalingGroupName=ASG_NAME,
+                                      DesiredCapacity=desired,
+                                      HonorCooldown=False)
+              raise Exception('Set desired count of %s to %s for %s' % (ASG_NAME, desired, task))
+
+          def run_task(task):
+              try:
+                  res = ECS.run_task(**task)
+                  if res['failures']:
+                      print('Failed to start %s: %s' % (task, res['failures']))
+                      scale_cluster(task)
+              except botocore.exceptions.ClientError as excp:
+                  message = excp.response['Error']['Message']
+                  if 'No Container Instances' in message:
+                      scale_cluster(task)
+                  raise
+
+              print('Started %s' % (task))
+
+          def lambda_handler(event, context):
+              for record in event['Records']:
+                  body = json.loads(record['body'])
+                  if 'containerOverrides' in body:
+                      overrides = {'containerOverrides': body['containerOverrides']}
+                  else:
+                      overrides = {}
+
+                  run_task({'cluster': CLUSTER,
+                            'taskDefinition': body['taskDefinition'],
+                            'overrides': overrides,
+                            'startedBy': body['jobName'],
+                            'placementStrategy': [{'type': 'binpack', 'field': 'memory'}]})
+
+
+  StartTasksLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Policies:
+        - PolicyName: !Sub ${AWS::StackName}-asg
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - autoscaling:DescribeAutoScalingGroups
+                  - autoscaling:SetDesiredCapacity
+                Resource: "*"
+        - PolicyName: !Sub ${AWS::StackName}-ecs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:DescribeClusters
+                  - ecs:RunTask
+                Resource: "*"
+        - PolicyName: !Sub ${AWS::StackName}-logs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                Effect: Allow
+                Resource: "*"
+        - PolicyName: !Sub ${AWS::StackName}-sqs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:ChangeMessageVisibility
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:ReceiveMessage
+                Resource:
+                  - !GetAtt StartTasksQueue.Arn
+                  - !GetAtt StartTasksDeadLetterQueue.Arn
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+              - lambda.amazonaws.com
+          Action:
+            - sts:AssumeRole
+
+  StartTasksQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      DelaySeconds: 0
+      MessageRetentionPeriod: 3600
+      VisibilityTimeout: 60
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt StartTasksDeadLetterQueue.Arn
+        maxReceiveCount: !Ref StartTasksQueueMaxReceiveCount
+
+  StartTasksDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+
+  StartTasksQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref StartTasksQueue
+      PolicyDocument:
+        Id: !Sub ${AWS::StackName}-start-task-sqs-policy
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              AWS: "*"
+            Action:
+              - "sqs:SendMessage"
+            Resource: !GetAtt StartTasksQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Sub "arn:aws:*:${AWS::Region}:${AWS::AccountId}:*"
+
+  StartTasksFunctionEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 1
+      Enabled: true
+      EventSourceArn: !GetAtt StartTasksQueue.Arn
+      FunctionName: !GetAtt StartTasksFunction.Arn
+
+  TerminateInstancesFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Drain and terminate inactive EC2 instances.
+      Handler: index.lambda_handler
+      Role: !GetAtt TerminateInstancesRole.Arn
+      Runtime: python3.6
+      MemorySize: 128
+      Timeout: 60
+      Code:
+        ZipFile: !Sub |
+          import datetime
+          import dateutil
+          import boto3
+
+          CLUSTER = '${ECSCluster}'
+          ASG_NAME = '${ECSAutoScalingGroup}'
+          DRAIN_TIMEOUT_SECS = ${TerminateInstancesAfterIdleSecs}
+
+          AS = boto3.client('autoscaling', region_name='${AWS::Region}')
+          ECS = boto3.client('ecs', region_name='${AWS::Region}')
+
+          def get_last_activity(instance):
+              ret = instance['registeredAt']
+              paginator = ECS.get_paginator('list_tasks')
+              for list_resp in paginator.paginate(cluster=CLUSTER,
+                                                  containerInstance=instance['containerInstanceArn'],
+                                                  desiredStatus='STOPPED'):
+                  if not list_resp['taskArns']:
+                      break
+
+                  task_resp = ECS.describe_tasks(cluster=CLUSTER,
+                                                 tasks=list_resp['taskArns'])
+                  for task in task_resp['tasks']:
+                      ret = max(ret, task['stoppedAt'])
+
+              return ret
+
+          def drain_ecs_instances(arns):
+              print('Draining %s' % (arns))
+              ECS.update_container_instances_state(cluster=CLUSTER,
+                                                   containerInstances=arns,
+                                                   status='DRAINING')
+
+          def process_ecs_instances():
+              paginator = ECS.get_paginator('list_container_instances')
+              for list_resp in paginator.paginate(cluster=CLUSTER):
+                  arns = list_resp['containerInstanceArns']
+                  if not arns:
+                      continue
+
+                  res = ECS.describe_container_instances(cluster=CLUSTER,
+                                                         containerInstances=arns)
+                  for instance in res['containerInstances']:
+                      if instance['runningTasksCount'] != 0:
+                          continue
+
+                      if instance['status'] == 'DRAINING':
+                          print('Terminating %s' % (instance))
+                          AS.terminate_instance_in_auto_scaling_group(InstanceId=instance['ec2InstanceId'],
+                                                                      ShouldDecrementDesiredCapacity=True)
+                      elif get_last_activity(instance) < datetime.datetime.now(dateutil.tz.tzlocal()) - \
+                                                         datetime.timedelta(seconds=DRAIN_TIMEOUT_SECS):
+                          drain_ecs_instances([instance['containerInstanceArn']])
+
+          def drain_instances_with_old_launch_config():
+              res = AS.describe_auto_scaling_groups(AutoScalingGroupNames=[ASG_NAME])
+              if not res['AutoScalingGroups']:
+                  return
+
+              drain = []
+              for ec2 in res['AutoScalingGroups'][0]['Instances']:
+                  if 'LaunchConfigurationName' not in ec2:
+                      drain.append(ec2['InstanceId'])
+
+              if not drain:
+                  return
+
+              print('Found instances with old launch config: %s' % (drain))
+              res = ECS.list_container_instances(cluster=CLUSTER,
+                                                 filter='ec2InstanceId in [%s]' % (','.join(drain)))
+              if not res['containerInstanceArns']:
+                  print('Cannot find %s' % (drain))
+                  return
+
+              drain_ecs_instances(res['containerInstanceArns'])
+
+          def lambda_handler(event, context):
+              process_ecs_instances()
+              drain_instances_with_old_launch_config()
+
+  TerminateInstancesRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Policies:
+        - PolicyName: !Sub ${AWS::StackName}-asg
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - autoscaling:DescribeAutoScalingGroups
+                  - autoscaling:TerminateInstanceInAutoScalingGroup
+                Effect: Allow
+                Resource: "*"
+        - PolicyName: !Sub ${AWS::StackName}-ecs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - ecs:DescribeContainerInstances
+                  - ecs:DescribeTasks
+                  - ecs:ListContainerInstances
+                  - ecs:ListTasks
+                  - ecs:UpdateContainerInstancesState
+                Effect: Allow
+                Resource: "*"
+        - PolicyName: !Sub ${AWS::StackName}-logs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                Effect: Allow
+                Resource: "*"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+  TerminateInstancesRule:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: !Ref TerminateInstancesScheduleExpression
+      Targets:
+        - Id: !Sub ${AWS::StackName}-terminator
+          Arn: !GetAtt TerminateInstancesFunction.Arn
+
+  TerminateInstancesInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt TerminateInstancesFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt TerminateInstancesRule.Arn
+
+Outputs:
+  VPC:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub ${AWS::StackName}-VPC
+
+  ECSHostSecurityGroup:
+    Description: Allow access from the internal network.
+    Value: !Ref ECSHostSecurityGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-ecs-host-security-group
+
+  ECSAutoScalingGroupName:
+    Description: Autoscaling group for the cluster.
+    Value: !Ref ECSAutoScalingGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-auto-scaling-group
+
+  StartTasksQueueUrl:
+    Description: SQS queue URL for submitting jobs to start.
+    Value: !Ref StartTasksQueue
+    Export:
+      Name: !Sub ${AWS::StackName}-start-tasks-queue-url
+
+  StartTasksQueueArn:
+    Description: SQS queue ARN for submitting jobs to start.
+    Value: !GetAtt StartTasksQueue.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-start-tasks-queue-arn
+
+  StartTasksDeadLetterQueueUrl:
+    Description: SQS dead letter queue URL for jobs that failed to launch.
+    Value: !Ref StartTasksDeadLetterQueue
+    Export:
+      Name: !Sub ${AWS::StackName}-start-tasks-dead-queue-url
+
+  StartTasksDeadLetterQueueArn:
+    Description: SQS dead letter queue ARN for jobs that failed to launch.
+    Value: !GetAtt StartTasksDeadLetterQueue.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-start-tasks-dead-queue-arn
