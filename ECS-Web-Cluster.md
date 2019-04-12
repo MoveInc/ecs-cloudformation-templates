@@ -247,7 +247,7 @@ on the current instance.
 By following these best practices and techniques, ECS can significantly lower infrastructure
 costs and simplify scaling, deployment, and management concerns. A fully functional CloudFormation
 template which implements all of these best practices can be
-[downloaded here](https://github.move.com/BMasney/ecs-cloudformation-templates/blob/master/ECS-Cluster.template).
+[downloaded here](ECS-Web-Cluster.template).
 
 The next article in this series will describe how we are doing blue/green deployments with canary
 containers inside ECS.
