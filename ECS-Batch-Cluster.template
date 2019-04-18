@@ -507,7 +507,7 @@ Resources:
                   run_task({'cluster': CLUSTER,
                             'taskDefinition': body['taskDefinition'],
                             'overrides': overrides,
-                            'startedBy': body['jobName'],
+                            'startedBy': body['jobName'][0:35],
                             'placementStrategy': [{'type': 'binpack', 'field': 'memory'}]})
 
 
