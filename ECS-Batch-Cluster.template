@@ -648,11 +648,12 @@ Resources:
 
               return ret
 
-          def drain_ecs_instances(arns):
-              print('Draining %s' % (arns))
-              ECS.update_container_instances_state(cluster=CLUSTER,
-                                                   containerInstances=arns,
-                                                   status='DRAINING')
+          def drain_ecs_instances(all_arns):
+              for arns in [all_arns[i::10] for i in range(10)]:
+                  print('Draining %s' % (arns))
+                  ECS.update_container_instances_state(cluster=CLUSTER,
+                                                       containerInstances=arns,
+                                                       status='DRAINING')
 
           def process_ecs_instances():
               paginator = ECS.get_paginator('list_container_instances')
