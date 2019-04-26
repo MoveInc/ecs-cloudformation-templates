@@ -423,7 +423,7 @@ Resources:
           # This is intentionally not a CloudFormation parameter.
           # Version: 1
 
-          yum install -y python36 python36-pip
+          yum install -y python36 python36-pip aws-cfn-bootstrap
           pip-3.6 install boto3
 
           /opt/aws/bin/cfn-init -v --region ${AWS::Region} --stack ${AWS::StackName} \
