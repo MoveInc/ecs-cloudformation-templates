@@ -90,7 +90,7 @@ Parameters:
     Type: AWS::EC2::VPC::Id
 
   AmiId:
-    Description: AMI ID for the EC2 instances.
+    Description: AMI ID for the EC2 instances. Should be based on Amazon Linux.
     Type: String
 
   KeyName:
