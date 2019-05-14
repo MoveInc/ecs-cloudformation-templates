@@ -51,6 +51,11 @@
 # is currently running a task. The first call of the terminate lambda will set the instance to
 # DRAINING, and the second call will terminate the instance.
 #
+# The terminate Lambda will look for EC2 instances that were started by autoscaling, but failed to
+# register with ECS within a 10 minute period. Without this check, the cluster will get into a state
+# where the StartTask Lambda thinks that autoscaling activity is currently in progress and no
+# additional instances will be started until the bad instance is terminated.
+#
 # It should be noted that this cluster template has the ability to scale down to zero instances on
 # its own when no tasks are running.
 #
@@ -627,10 +632,16 @@ Resources:
 
           CLUSTER = '${ECSCluster}'
           ASG_NAME = '${ECSAutoScalingGroup}'
-          DRAIN_TIMEOUT_SECS = ${TerminateInstancesAfterIdleSecs}
 
-          AS = boto3.client('autoscaling', region_name='${AWS::Region}')
-          ECS = boto3.client('ecs', region_name='${AWS::Region}')
+          def aws(svc):
+              return boto3.client(svc, region_name='${AWS::Region}')
+
+          AS = aws('autoscaling')
+          EC2 = aws('ec2')
+          ECS = aws('ecs')
+
+          def get_instance_timeout():
+              return datetime.datetime.now(dateutil.tz.tzlocal()) - datetime.timedelta(seconds=720)
 
           def get_last_activity(instance):
               ret = instance['registeredAt']
@@ -648,14 +659,28 @@ Resources:
 
               return ret
 
+          def terminate_ec2_instance(instance_id):
+              print('Terminating %s' % (instance_id))
+              AS.terminate_instance_in_auto_scaling_group(InstanceId=instance_id,
+                                                          ShouldDecrementDesiredCapacity=True)
+
           def drain_ecs_instances(all_arns):
-              for arns in [all_arns[i::10] for i in range(10)]:
-                  print('Draining %s' % (arns))
+              for arn in all_arns:
+                  print('Draining %s' % (arn))
                   ECS.update_container_instances_state(cluster=CLUSTER,
-                                                       containerInstances=arns,
+                                                       containerInstances=[arn],
                                                        status='DRAINING')
 
+          def drain_ec2_instances(instance_ids):
+              res = ECS.list_container_instances(cluster=CLUSTER,
+                                                 filter='ec2InstanceId in [%s]' % (','.join(instance_ids)))
+              if not res['containerInstanceArns']:
+                  return
+
+              drain_ecs_instances(res['containerInstanceArns'])
+
           def process_ecs_instances():
+              ec2_instance_ids = set()
               paginator = ECS.get_paginator('list_container_instances')
               for list_resp in paginator.paginate(cluster=CLUSTER):
                   arns = list_resp['containerInstanceArns']
@@ -665,42 +690,48 @@ Resources:
                   res = ECS.describe_container_instances(cluster=CLUSTER,
                                                          containerInstances=arns)
                   for instance in res['containerInstances']:
+                      ec2_instance_ids.add(instance['ec2InstanceId'])
+
                       if instance['runningTasksCount'] != 0:
                           continue
 
                       if instance['status'] == 'DRAINING':
-                          print('Terminating %s' % (instance))
-                          AS.terminate_instance_in_auto_scaling_group(InstanceId=instance['ec2InstanceId'],
-                                                                      ShouldDecrementDesiredCapacity=True)
-                      elif get_last_activity(instance) < datetime.datetime.now(dateutil.tz.tzlocal()) - \
-                                                         datetime.timedelta(seconds=DRAIN_TIMEOUT_SECS):
+                          terminate_ec2_instance(instance['ec2InstanceId'])
+                      elif get_last_activity(instance) < get_instance_timeout():
                           drain_ecs_instances([instance['containerInstanceArn']])
 
-          def drain_instances_with_old_launch_config():
+              return ec2_instance_ids
+
+          def terminate_bad_ec2_instances(instance_ids):
+              instances = EC2.describe_instances(InstanceIds=instance_ids)
+              for instance in instances['Reservations'][0]['Instances']:
+                  if instance['LaunchTime'] < get_instance_timeout():
+                      print('Instance %s failed to register with ECS' % (instance['InstanceId']))
+                      terminate_ec2_instance(instance['InstanceId'])
+
+          def drain_or_terminate_instances(ec2_instances_in_ecs):
               res = AS.describe_auto_scaling_groups(AutoScalingGroupNames=[ASG_NAME])
               if not res['AutoScalingGroups']:
                   return
 
-              drain = []
+              instance_to_drain = []
+              possibly_bad = []
               for ec2 in res['AutoScalingGroups'][0]['Instances']:
+                  if ec2['InstanceId'] not in ec2_instances_in_ecs:
+                      possibly_bad.append(ec2['InstanceId'])
+
                   if 'LaunchConfigurationName' not in ec2:
-                      drain.append(ec2['InstanceId'])
+                      instance_to_drain.append(ec2['InstanceId'])
 
-              if not drain:
-                  return
+              if instance_to_drain:
+                  drain_ec2_instances(instance_to_drain)
 
-              print('Found instances with old launch config: %s' % (drain))
-              res = ECS.list_container_instances(cluster=CLUSTER,
-                                                 filter='ec2InstanceId in [%s]' % (','.join(drain)))
-              if not res['containerInstanceArns']:
-                  print('Cannot find %s' % (drain))
-                  return
-
-              drain_ecs_instances(res['containerInstanceArns'])
+              if possibly_bad:
+                  terminate_bad_ec2_instances(possibly_bad)
 
           def lambda_handler(event, context):
-              process_ecs_instances()
-              drain_instances_with_old_launch_config()
+              ec2_instances_in_ecs = process_ecs_instances()
+              drain_or_terminate_instances(ec2_instances_in_ecs)
 
   TerminateInstancesRole:
     Type: AWS::IAM::Role
@@ -713,6 +744,14 @@ Resources:
               - Action:
                   - autoscaling:DescribeAutoScalingGroups
                   - autoscaling:TerminateInstanceInAutoScalingGroup
+                Effect: Allow
+                Resource: "*"
+        - PolicyName: !Sub ${AWS::StackName}-ec2
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - ec2:DescribeInstances
                 Effect: Allow
                 Resource: "*"
         - PolicyName: !Sub ${AWS::StackName}-ecs
