@@ -98,6 +98,6 @@ now has a low-stress environment in production to troubleshoot the error.
 Our CloudFormation templates for ECS
 [are available on GitHub](https://github.com/MoveInc/ecs-cloudformation-templates). The ECS service
 template is available in the file
-[ECS-Service.template](https://github.com/MoveInc/ecs-cloudformation-templates/ECS-Service.template)
+[ECS-Service.template](https://github.com/MoveInc/ecs-cloudformation-templates/blob/master/ECS-Service.template)
 and the canary support is in the file
-[ECS-Service-Canary.template](https://github.com/MoveInc/ecs-cloudformation-templates/ECS-Service-Canary.template).
+[ECS-Service-Canary.template](https://github.com/MoveInc/ecs-cloudformation-templates/blob/master/ECS-Service-Canary.template).
